@@ -3,6 +3,7 @@
 # Copyright (c) 2021-2026 tteck
 # Author: tteck (tteckster)
 # Co-Author: remz1337
+# Modified for ARM64: Uses Chromium instead of Chrome
 # License: MIT | https://github.com/asylumexp/Proxmox/raw/main/LICENSE
 # Source: https://github.com/FlareSolverr/FlareSolverr
 
@@ -20,21 +21,13 @@ $STD apt-get install -y xvfb
 $STD apt-get install -y wget
 $STD apt-get install -y git
 $STD apt-get install -y openssh-server
-$STD apt-get install -y chromium-common
-$STD apt-mark hold chromium
 msg_ok "Installed Dependencies"
 
-msg_info "Installing Chrome"
-setup_deb822_repo \
-  "google-chrome" \
-  "https://dl.google.com/linux/linux_signing_key.pub" \
-  "https://dl.google.com/linux/chrome/deb/" \
-  "stable"
-$STD apt update
-$STD apt install -y google-chrome-stable
-# remove google-chrome.list added by google-chrome-stable
-rm /etc/apt/sources.list.d/google-chrome.list
-msg_ok "Installed Chrome"
+msg_info "Installing Chromium"
+# Unhold chromium if it was held by previous scripts
+apt-mark unhold chromium 2>/dev/null || true
+$STD apt-get install -y chromium chromium-driver
+msg_ok "Installed Chromium"
 
 fetch_and_deploy_gh_release "flaresolverr" "FlareSolverr/FlareSolverr" "prebuild" "latest" "/opt/flaresolverr" "flaresolverr_linux_arm64.tar.gz"
 
@@ -50,6 +43,7 @@ RestartSec=5
 Type=simple
 Environment="LOG_LEVEL=info"
 Environment="CAPTCHA_SOLVER=none"
+Environment="CHROME_EXE=/usr/bin/chromium"
 WorkingDirectory=/opt/flaresolverr
 ExecStart=python3 /opt/flaresolverr/src/flaresolverr.py
 TimeoutStopSec=30
