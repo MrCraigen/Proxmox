@@ -28,7 +28,8 @@ $STD apt install -y \
   libpq-dev \
   rustc \
   cargo \
-  pkg-config
+  pkg-config \
+  curl
 msg_ok "Installed Dependencies"
 
 NODE_VERSION="22" NODE_MODULE="yarn" setup_nodejs
@@ -37,34 +38,43 @@ read -p "${TAB3}Please enter the name for your server: " servername
 
 msg_info "Installing Element Synapse"
 
+# Create dedicated synapse user and directories up front
+adduser --system --group --no-create-home --home /var/lib/matrix-synapse synapse 2>/dev/null || true
+mkdir -p /var/lib/matrix-synapse /var/log/matrix-synapse /etc/matrix-synapse /opt/media_store
+chown -R synapse:synapse /var/lib/matrix-synapse /var/log/matrix-synapse /etc/matrix-synapse /opt/media_store
+
 # Create venv and install Synapse via pip (ARM64 compatible)
 mkdir -p /opt/venv
 python3 -m venv /opt/venv/synapse
 $STD /opt/venv/synapse/bin/pip install --upgrade pip
 $STD /opt/venv/synapse/bin/pip install "matrix-synapse[all]"
 
-# Generate config
-mkdir -p /etc/matrix-synapse
-/opt/venv/synapse/bin/python -m synapse.app.homeserver \
+# Generate config as the synapse user so file ownership is correct
+SECRET=$(openssl rand -hex 32)
+ADMIN_PASS="$(openssl rand -base64 18 | cut -c1-13)"
+
+sudo -u synapse /opt/venv/synapse/bin/python -m synapse.app.homeserver \
   --generate-config \
   --server-name "$servername" \
   --report-stats=no \
   --config-path /etc/matrix-synapse/homeserver.yaml
 
+# Fix: --generate-config already adds registration_shared_secret, so replace it rather than append
+sed -i "s|^registration_shared_secret:.*|registration_shared_secret: \"${SECRET}\"|" /etc/matrix-synapse/homeserver.yaml
+
 # Bind to all interfaces instead of localhost only
 sed -i 's/127.0.0.1/0.0.0.0/g' /etc/matrix-synapse/homeserver.yaml
 sed -i "s/'::1', //g" /etc/matrix-synapse/homeserver.yaml
 
-# Add registration and shared secret settings
-SECRET=$(openssl rand -hex 32)
-ADMIN_PASS="$(openssl rand -base64 18 | cut -c1-13)"
-echo "enable_registration_without_verification: true" >>/etc/matrix-synapse/homeserver.yaml
-echo "registration_shared_secret: ${SECRET}" >>/etc/matrix-synapse/homeserver.yaml
+# Add the synapse resource to the listener (required for register_new_matrix_user)
+sed -i '/names:/a\      - synapse' /etc/matrix-synapse/homeserver.yaml
 
-# Create a dedicated system user for synapse
-adduser --system --group --no-create-home --home /var/lib/matrix-synapse synapse 2>/dev/null || true
-mkdir -p /var/lib/matrix-synapse /var/log/matrix-synapse
-chown -R synapse:synapse /var/lib/matrix-synapse /var/log/matrix-synapse /etc/matrix-synapse
+# Enable registration without verification
+echo "enable_registration_without_verification: true" >>/etc/matrix-synapse/homeserver.yaml
+
+# Ensure log file is writable by synapse user
+touch /opt/homeserver.log
+chown synapse:synapse /opt/homeserver.log
 
 # Create systemd service
 cat <<EOF >/etc/systemd/system/matrix-synapse.service
@@ -87,9 +97,9 @@ EOF
 
 systemctl enable -q --now matrix-synapse
 
-# Wait for synapse to actually be ready on port 8008 (can take 30-60s on first run)
+# Wait for synapse to be ready on port 8008
 msg_info "Waiting for Synapse to start"
-for i in $(seq 1 60); do
+for i in $(seq 1 90); do
   if curl -sf http://localhost:8008/_matrix/client/versions >/dev/null 2>&1; then
     break
   fi
@@ -97,7 +107,7 @@ for i in $(seq 1 60); do
 done
 msg_ok "Synapse is ready"
 
-$STD /opt/venv/synapse/bin/register_new_matrix_user \
+/opt/venv/synapse/bin/register_new_matrix_user \
   -a \
   --user admin \
   --password "$ADMIN_PASS" \
@@ -110,12 +120,6 @@ $STD /opt/venv/synapse/bin/register_new_matrix_user \
   echo "Admin password: $ADMIN_PASS"
 } >>~/matrix.creds
 
-# The generated log config file path is correct, no need to remove it
-# Just ensure the log file location is writable
-touch /opt/homeserver.log
-chown synapse:synapse /opt/homeserver.log
-
-systemctl restart matrix-synapse
 msg_ok "Installed Element Synapse"
 
 fetch_and_deploy_gh_release "synapse-admin" "etkecc/synapse-admin" "tarball"
