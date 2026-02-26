@@ -14,14 +14,14 @@ network_check
 update_os
 
 msg_info "Installing Dependencies"
-$STD apt install -y libicu76
+$STD apt install -y build-essential libicu76
 msg_ok "Installed Dependencies"
 
 PYTHON_VERSION="3.12" setup_uv
 fetch_and_deploy_gh_release "huntarr" "plexguide/Huntarr.io" "tarball"
 
 msg_info "Configure Huntarr"
-$STD uv venv /opt/huntarr/.venv
+$STD uv venv --clear /opt/huntarr/.venv
 $STD uv pip install --python /opt/huntarr/.venv/bin/python -r /opt/huntarr/requirements.txt
 msg_ok "Configured Huntrarr"
 
