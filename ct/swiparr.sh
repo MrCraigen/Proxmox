@@ -8,7 +8,7 @@ source <(curl -fsSL https://raw.githubusercontent.com/MrCraigen/Proxmox/main/mis
 APP="Swiparr"
 var_tags="${var_tags:-arr;jellyfin}"
 var_cpu="${var_cpu:-2}"
-var_ram="${var_ram:-1024}"
+var_ram="${var_ram:-2048}"
 var_disk="${var_disk:-4}"
 var_os="${var_os:-debian}"
 var_version="${var_version:-12}"
