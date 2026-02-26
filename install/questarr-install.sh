@@ -30,13 +30,14 @@ msg_ok "Installed Node.js $(node -v)"
 
 msg_info "Installing Questarr"
 RELEASE=$(curl -fsSL https://api.github.com/repos/Doezer/Questarr/releases/latest | grep '"tag_name"' | cut -d '"' -f 4)
-mkdir -p /opt/questarr /opt/questarr/data
+rm -rf /opt/questarr
 if [[ -n "$RELEASE" ]]; then
   $STD git clone --depth 1 --branch "${RELEASE}" https://github.com/Doezer/Questarr.git /opt/questarr
 else
   RELEASE="main"
   $STD git clone --depth 1 https://github.com/Doezer/Questarr.git /opt/questarr
 fi
+mkdir -p /opt/questarr/data
 cd /opt/questarr
 npm install &>/dev/null
 npm run build &>/dev/null
