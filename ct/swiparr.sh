@@ -35,8 +35,12 @@ function update_script() {
   cd /opt/swiparr
   git pull --quiet origin master
   npm install --silent
-  npm run build --silent
+  NODE_OPTIONS="--max-old-space-size=1536" npm run build --silent
   msg_ok "Updated ${APP}"
+
+  msg_info "Running Database Migrations"
+  DATABASE_URL=file:/opt/swiparr/data/swiparr.db npm run db:migrate
+  msg_ok "Database Migrations Complete"
 
   msg_info "Starting Service"
   systemctl start swiparr
