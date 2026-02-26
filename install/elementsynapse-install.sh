@@ -66,9 +66,6 @@ sed -i "s|^registration_shared_secret:.*|registration_shared_secret: \"${SECRET}
 sed -i 's/127.0.0.1/0.0.0.0/g' /etc/matrix-synapse/homeserver.yaml
 sed -i "s/'::1', //g" /etc/matrix-synapse/homeserver.yaml
 
-# Add the synapse resource to the listener (required for register_new_matrix_user)
-sed -i '/names:/a\      - synapse' /etc/matrix-synapse/homeserver.yaml
-
 # Enable registration without verification
 echo "enable_registration_without_verification: true" >>/etc/matrix-synapse/homeserver.yaml
 
