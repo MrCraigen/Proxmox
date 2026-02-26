@@ -42,7 +42,7 @@ msg_ok "Cloned Swiparr"
 
 msg_info "Building Swiparr"
 $STD npm install
-$STD npm run build
+NODE_OPTIONS="--max-old-space-size=1536" $STD npm run build
 msg_ok "Built Swiparr"
 
 msg_info "Running Database Migrations"
