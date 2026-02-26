@@ -40,8 +40,8 @@ msg_info "Installing Element Synapse"
 
 # Create dedicated synapse user and directories up front
 adduser --system --group --no-create-home --home /var/lib/matrix-synapse synapse 2>/dev/null || true
-mkdir -p /var/lib/matrix-synapse /var/log/matrix-synapse /etc/matrix-synapse /opt/media_store
-chown -R synapse:synapse /var/lib/matrix-synapse /var/log/matrix-synapse /etc/matrix-synapse /opt/media_store
+mkdir -p /var/lib/matrix-synapse/media_store /var/log/matrix-synapse /etc/matrix-synapse
+chown -R synapse:synapse /var/lib/matrix-synapse /var/log/matrix-synapse /etc/matrix-synapse
 
 # Create venv and install Synapse via pip (ARM64 compatible)
 mkdir -p /opt/venv
@@ -49,29 +49,35 @@ python3 -m venv /opt/venv/synapse
 $STD /opt/venv/synapse/bin/pip install --upgrade pip
 $STD /opt/venv/synapse/bin/pip install "matrix-synapse[all]"
 
-# Generate config as the synapse user so file ownership is correct
+# Generate secrets
 SECRET=$(openssl rand -hex 32)
 ADMIN_PASS="$(openssl rand -base64 18 | cut -c1-13)"
 
+# Generate config as synapse user
 sudo -u synapse /opt/venv/synapse/bin/python -m synapse.app.homeserver \
   --generate-config \
   --server-name "$servername" \
   --report-stats=no \
   --config-path /etc/matrix-synapse/homeserver.yaml
 
-# Fix: --generate-config already adds registration_shared_secret, so replace it rather than append
+# Replace registration_shared_secret (already in generated config, just swap the value)
 sed -i "s|^registration_shared_secret:.*|registration_shared_secret: \"${SECRET}\"|" /etc/matrix-synapse/homeserver.yaml
 
-# Bind to all interfaces instead of localhost only
+# Bind to all interfaces
 sed -i 's/127.0.0.1/0.0.0.0/g' /etc/matrix-synapse/homeserver.yaml
 sed -i "s/'::1', //g" /etc/matrix-synapse/homeserver.yaml
 
-# Enable registration without verification
-echo "enable_registration_without_verification: true" >>/etc/matrix-synapse/homeserver.yaml
+# Fix all /opt paths to /var/lib/matrix-synapse so the synapse user can write to them
+sed -i 's|pid_file: /opt/homeserver.pid|pid_file: /var/lib/matrix-synapse/homeserver.pid|' /etc/matrix-synapse/homeserver.yaml
+sed -i 's|database: /opt/homeserver.db|database: /var/lib/matrix-synapse/homeserver.db|' /etc/matrix-synapse/homeserver.yaml
+sed -i 's|media_store_path: /opt/media_store|media_store_path: /var/lib/matrix-synapse/media_store|' /etc/matrix-synapse/homeserver.yaml
 
-# Ensure log file is writable by synapse user
-touch /opt/homeserver.log
-chown synapse:synapse /opt/homeserver.log
+# Remove vim modeline at end of file — it has no trailing newline, so appending
+# to the file merges with the comment line and breaks YAML parsing
+sed -i '/^# vim:ft=yaml/d' /etc/matrix-synapse/homeserver.yaml
+
+# Append settings cleanly with guaranteed leading newline
+printf '\nenable_registration_without_verification: true\n' >> /etc/matrix-synapse/homeserver.yaml
 
 # Create systemd service
 cat <<EOF >/etc/systemd/system/matrix-synapse.service
@@ -150,6 +156,9 @@ EOF
 systemctl enable -q --now synapse-admin
 msg_ok "Created Service"
 
+motd_ssh
+customize
+cleanup_lxc
 motd_ssh
 customize
 cleanup_lxc
