@@ -71,7 +71,8 @@ EOF
 ln -sf /etc/nginx/sites-available/lar-med-nadira /etc/nginx/sites-enabled/lar-med-nadira
 rm -f /etc/nginx/sites-enabled/default
 $STD nginx -t
-systemctl enable -q --now nginx
+systemctl enable nginx -q
+systemctl restart nginx
 msg_ok "Configured and Started Nginx"
 
 motd_ssh
