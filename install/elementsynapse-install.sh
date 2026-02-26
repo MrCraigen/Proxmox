@@ -4,6 +4,7 @@
 # Author: tremor021
 # License: MIT | https://github.com/asylumexp/Proxmox/raw/main/LICENSE
 # Source: https://github.com/element-hq/synapse
+# Modified for ARM64 compatibility: uses pip/venv instead of matrix.org apt repo
 
 source /dev/stdin <<<"$FUNCTIONS_FILE_PATH"
 color
@@ -15,8 +16,19 @@ update_os
 
 msg_info "Installing Dependencies"
 $STD apt install -y \
-  apt-transport-https \
-  debconf-utils
+  python3 \
+  python3-pip \
+  python3-venv \
+  python3-dev \
+  build-essential \
+  libffi-dev \
+  libssl-dev \
+  libjpeg-dev \
+  libxslt1-dev \
+  libpq-dev \
+  rustc \
+  cargo \
+  pkg-config
 msg_ok "Installed Dependencies"
 
 NODE_VERSION="22" NODE_MODULE="yarn" setup_nodejs
@@ -24,33 +36,77 @@ NODE_VERSION="22" NODE_MODULE="yarn" setup_nodejs
 read -p "${TAB3}Please enter the name for your server: " servername
 
 msg_info "Installing Element Synapse"
-setup_deb822_repo "matrix-org" \
-  "https://packages.matrix.org/debian/matrix-org-archive-keyring.gpg" \
-  "https://packages.matrix.org/debian/" \
-  "$(get_os_info codename)" \
-  "main"
-echo "matrix-synapse-py3 matrix-synapse/server-name string $servername" | debconf-set-selections
-echo "matrix-synapse-py3 matrix-synapse/report-stats boolean false" | debconf-set-selections
-echo "exit 101" >/usr/sbin/policy-rc.d
-chmod +x /usr/sbin/policy-rc.d
-$STD apt install matrix-synapse-py3 -y
-rm -f /usr/sbin/policy-rc.d
+
+# Create venv and install Synapse via pip (ARM64 compatible)
+mkdir -p /opt/venv
+python3 -m venv /opt/venv/synapse
+$STD /opt/venv/synapse/bin/pip install --upgrade pip
+$STD /opt/venv/synapse/bin/pip install "matrix-synapse[all]"
+
+# Generate config
+mkdir -p /etc/matrix-synapse
+/opt/venv/synapse/bin/python -m synapse.app.homeserver \
+  --generate-config \
+  --server-name "$servername" \
+  --report-stats=no \
+  --config-path /etc/matrix-synapse/homeserver.yaml
+
+# Bind to all interfaces instead of localhost only
 sed -i 's/127.0.0.1/0.0.0.0/g' /etc/matrix-synapse/homeserver.yaml
-sed -i 's/'\''::1'\'', //g' /etc/matrix-synapse/homeserver.yaml
+sed -i "s/'::1', //g" /etc/matrix-synapse/homeserver.yaml
+
+# Add registration and shared secret settings
 SECRET=$(openssl rand -hex 32)
 ADMIN_PASS="$(openssl rand -base64 18 | cut -c1-13)"
 echo "enable_registration_without_verification: true" >>/etc/matrix-synapse/homeserver.yaml
 echo "registration_shared_secret: ${SECRET}" >>/etc/matrix-synapse/homeserver.yaml
+
+# Create a dedicated system user for synapse
+adduser --system --group --no-create-home --home /var/lib/matrix-synapse synapse 2>/dev/null || true
+mkdir -p /var/lib/matrix-synapse /var/log/matrix-synapse
+chown -R synapse:synapse /var/lib/matrix-synapse /var/log/matrix-synapse /etc/matrix-synapse
+
+# Create systemd service
+cat <<EOF >/etc/systemd/system/matrix-synapse.service
+[Unit]
+Description=Synapse Matrix homeserver
+After=network.target
+
+[Service]
+Type=simple
+User=synapse
+Group=synapse
+WorkingDirectory=/var/lib/matrix-synapse
+ExecStart=/opt/venv/synapse/bin/python -m synapse.app.homeserver --config-path /etc/matrix-synapse/homeserver.yaml
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 systemctl enable -q --now matrix-synapse
-$STD register_new_matrix_user -a --user admin --password "$ADMIN_PASS" --config /etc/matrix-synapse/homeserver.yaml
+
+# Wait for synapse to be ready before registering admin user
+sleep 5
+$STD /opt/venv/synapse/bin/register_new_matrix_user \
+  -a \
+  --user admin \
+  --password "$ADMIN_PASS" \
+  --config /etc/matrix-synapse/homeserver.yaml \
+  http://localhost:8008
+
 {
   echo "Matrix-Credentials"
   echo "Admin username: admin"
   echo "Admin password: $ADMIN_PASS"
 } >>~/matrix.creds
-systemctl stop matrix-synapse
-sed -i '34d' /etc/matrix-synapse/homeserver.yaml
-systemctl start matrix-synapse
+
+# Remove the log_config line that points to a non-existent file (line 34 equivalent)
+# Instead we do it safely with sed targeting the actual key
+sed -i '/^log_config:/d' /etc/matrix-synapse/homeserver.yaml
+
+systemctl restart matrix-synapse
 msg_ok "Installed Element Synapse"
 
 fetch_and_deploy_gh_release "synapse-admin" "etkecc/synapse-admin" "tarball"
