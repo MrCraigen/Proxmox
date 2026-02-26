@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-source <(curl -fsSL https://raw.githubusercontent.com/MrCraigen/Proxmox/main/misc/build.func)
+source <(curl -fsSL https://raw.githubusercontent.com/asylumexp/Proxmox/main/misc/build.func)
 # Copyright (c) 2021-2026 tteck
 # Author: MrCraigen
 # License: MIT | https://github.com/MrCraigen/Proxmox/raw/main/LICENSE
 # Source: https://github.com/asifma/lar-med-nadira
 
-APP="Lär-med-Nadira"
+APP="Lar-med-Nadira"
 var_tags="${var_tags:-education}"
 var_cpu="${var_cpu:-2}"
 var_ram="${var_ram:-1024}"
 var_disk="${var_disk:-4}"
 var_os="${var_os:-debian}"
-var_version="${var_version:-12}"
+var_version="${var_version:-13}"
 var_unprivileged="${var_unprivileged:-1}"
 
 header_info "$APP"
