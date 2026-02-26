@@ -46,8 +46,18 @@ NODE_OPTIONS="--max-old-space-size=1536" $STD npm run build
 msg_ok "Built Swiparr"
 
 msg_info "Running Database Migrations"
-$STD npm run db:migrate
+mkdir -p /opt/swiparr/data
+DATABASE_URL=file:/opt/swiparr/data/swiparr.db $STD npm run db:migrate
 msg_ok "Database Migrations Complete"
+
+msg_info "Configuring Swiparr"
+read -rp "Enter your Jellyfin URL (e.g. http://192.168.1.10:8096): " JELLYFIN_URL
+while [[ -z "$JELLYFIN_URL" ]]; do
+  msg_error "JELLYFIN_URL cannot be empty"
+  read -rp "Enter your Jellyfin URL: " JELLYFIN_URL
+done
+AUTH_SECRET=$(openssl rand -hex 32)
+msg_ok "Configuration complete"
 
 msg_info "Creating Service"
 cat <<EOF >/etc/systemd/system/swiparr.service
@@ -69,11 +79,12 @@ SyslogIdentifier=swiparr
 Environment=NODE_ENV=production
 Environment=PORT=4321
 Environment=DATABASE_URL=file:/opt/swiparr/data/swiparr.db
+Environment=AUTH_SECRET=${AUTH_SECRET}
+Environment=JELLYFIN_URL=${JELLYFIN_URL}
 
 [Install]
 WantedBy=multi-user.target
 EOF
-mkdir -p /opt/swiparr/data
 systemctl enable --quiet --now swiparr
 msg_ok "Created and Started Service"
 
