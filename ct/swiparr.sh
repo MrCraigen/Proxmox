@@ -36,6 +36,8 @@ function update_script() {
   git pull --quiet origin master
   npm install --silent
   NODE_OPTIONS="--max-old-space-size=1536" npm run build --silent
+  cp -r /opt/swiparr/.next/static /opt/swiparr/.next/standalone/.next/static
+  cp -r /opt/swiparr/public /opt/swiparr/.next/standalone/public
   msg_ok "Updated ${APP}"
 
   msg_info "Running Database Migrations"
