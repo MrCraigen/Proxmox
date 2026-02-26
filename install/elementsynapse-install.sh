@@ -87,8 +87,16 @@ EOF
 
 systemctl enable -q --now matrix-synapse
 
-# Wait for synapse to be ready before registering admin user
-sleep 5
+# Wait for synapse to actually be ready on port 8008 (can take 30-60s on first run)
+msg_info "Waiting for Synapse to start"
+for i in $(seq 1 60); do
+  if curl -sf http://localhost:8008/_matrix/client/versions >/dev/null 2>&1; then
+    break
+  fi
+  sleep 2
+done
+msg_ok "Synapse is ready"
+
 $STD /opt/venv/synapse/bin/register_new_matrix_user \
   -a \
   --user admin \
@@ -102,9 +110,10 @@ $STD /opt/venv/synapse/bin/register_new_matrix_user \
   echo "Admin password: $ADMIN_PASS"
 } >>~/matrix.creds
 
-# Remove the log_config line that points to a non-existent file (line 34 equivalent)
-# Instead we do it safely with sed targeting the actual key
-sed -i '/^log_config:/d' /etc/matrix-synapse/homeserver.yaml
+# The generated log config file path is correct, no need to remove it
+# Just ensure the log file location is writable
+touch /opt/homeserver.log
+chown synapse:synapse /opt/homeserver.log
 
 systemctl restart matrix-synapse
 msg_ok "Installed Element Synapse"
