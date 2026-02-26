@@ -13,7 +13,20 @@ setting_up_container
 network_check
 update_os
 
-fetch_and_deploy_gh_release "AdGuardHome" "AdguardTeam/AdGuardHome" "prebuild" "latest" "/opt/AdGuardHome" "AdGuardHome_linux_arm64.tar.gz"
+if command -v dpkg >/dev/null 2>&1; then
+  arch="$(dpkg --print-architecture)"
+else
+  arch="$(uname -m)"
+fi
+
+case "$arch" in
+  amd64|x86_64) adguard_pkg="AdGuardHome_linux_amd64.tar.gz" ;;
+  arm64|aarch64) adguard_pkg="AdGuardHome_linux_arm64.tar.gz" ;;
+  armv7l|armhf) adguard_pkg="AdGuardHome_linux_armv7.tar.gz" ;;
+  *) msg_error "Unsupported architecture: $arch" && exit 1 ;;
+esac
+
+fetch_and_deploy_gh_release "AdGuardHome" "AdguardTeam/AdGuardHome" "prebuild" "latest" "/opt/AdGuardHome" "$adguard_pkg"
 
 msg_info "Creating Service"
 cat <<EOF >/etc/systemd/system/AdGuardHome.service
