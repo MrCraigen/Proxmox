@@ -34,10 +34,10 @@ function update_script() {
   ARCH=$(uname -m)
   if [[ "$ARCH" == "x86_64" ]]; then
     SPOTIFLAC_BIN="SpotiFLAC-Linux-x86_64"
-    WINDSCRIBE_URL="https://windscribe.com/install/desktop/deb_x64/beta"
+    WINDSCRIBE_ARCH="amd64"
   elif [[ "$ARCH" == "aarch64" ]]; then
     SPOTIFLAC_BIN="SpotiFLAC-Linux-arm64"
-    WINDSCRIBE_URL="https://windscribe.com/install/desktop/deb_arm64/beta"
+    WINDSCRIBE_ARCH="arm64"
   else
     msg_error "Unsupported architecture: $ARCH"
     exit 1
@@ -59,12 +59,18 @@ function update_script() {
   echo "${RELEASE}" > /opt/spotiflac/version.txt
   msg_ok "Updated SpotiFLAC CLI to ${RELEASE}"
 
-  msg_info "Updating Windscribe VPN"
-  curl -fsSL "${WINDSCRIBE_URL}" -o /tmp/windscribe_install.deb
+  msg_info "Updating Windscribe VPN CLI"
+  WS_RELEASE=$(curl -fsSL "https://api.github.com/repos/Windscribe/Desktop-App/releases/latest" \
+    | grep '"tag_name"' \
+    | sed -E 's/.*"([^"]+)".*/\1/')
+  WS_VER="${WS_RELEASE#v}"
+  WS_DEB="windscribe-cli_${WS_VER}_${WINDSCRIBE_ARCH}.deb"
+  WS_URL="https://github.com/Windscribe/Desktop-App/releases/download/${WS_RELEASE}/${WS_DEB}"
+  curl -fsSL "${WS_URL}" -o /tmp/windscribe_install.deb
   dpkg -i /tmp/windscribe_install.deb &>/dev/null || true
   apt-get install -f -y &>/dev/null
   rm -f /tmp/windscribe_install.deb
-  msg_ok "Updated Windscribe VPN"
+  msg_ok "Updated Windscribe VPN CLI to ${WS_RELEASE}"
 
   msg_info "Starting ${APP} Service"
   systemctl start spotiflac 2>/dev/null || true
