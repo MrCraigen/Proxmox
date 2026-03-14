@@ -19,7 +19,8 @@ msg_info "Installing Dependencies"
 $STD apt-get install -y \
   curl wget python3 python3-pip python3-venv ffmpeg jq \
   ca-certificates apt-transport-https gnupg \
-  openvpn resolvconf net-tools iproute2 wireguard-tools
+  openvpn resolvconf net-tools iproute2 wireguard-tools \
+  iptables iw ethtool
 msg_ok "Installed Dependencies"
 
 # Detect Architecture
@@ -129,8 +130,8 @@ if [[ ! -s /tmp/windscribe_install.deb ]]; then
   exit 1
 fi
 
-$STD dpkg -i /tmp/windscribe_install.deb || true
-$STD apt-get install -f -y
+dpkg --force-depends -i /tmp/windscribe_install.deb &>/dev/null || true
+apt-get install -f -y &>/dev/null
 rm -f /tmp/windscribe_install.deb
 $STD systemctl enable windscribe 2>/dev/null || true
 msg_ok "Installed Windscribe VPN CLI ${WS_RELEASE} (${ARCH_LABEL})"
