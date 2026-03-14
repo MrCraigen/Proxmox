@@ -15,6 +15,8 @@ var_disk="${var_disk:-8}"
 var_os="${var_os:-debian}"
 var_version="${var_version:-12}"
 var_unprivileged="${var_unprivileged:-1}"
+var_tun="${var_tun:-yes}"           # Required for Windscribe VPN
+var_ns="${var_ns:-1.1.1.1}"         # Force real DNS -- avoids broken systemd-resolved stub
 
 header_info "$APP"
 variables
@@ -48,10 +50,13 @@ function update_script() {
   msg_ok "Stopped ${APP} Service"
 
   msg_info "Updating SpotiFLAC CLI"
-  RELEASE=$(curl -fsSL "https://api.github.com/repos/jelte1/SpotiFLAC-Command-Line-Interface/releases/latest" \
-    | grep '"tag_name"' \
-    | sed -E 's/.*"([^"]+)".*/\1/')
-  curl -fsSL \
+  RELEASE=""
+  SF_API=$(curl -fsSL --max-time 10 \
+    "https://api.github.com/repos/jelte1/SpotiFLAC-Command-Line-Interface/releases/latest" \
+    2>/dev/null || true)
+  [[ -n "$SF_API" ]] && RELEASE=$(echo "$SF_API" | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/' || true)
+  [[ -z "$RELEASE" ]] && RELEASE=$(cat /opt/spotiflac/version.txt 2>/dev/null || echo "v1.0.23")
+  curl -fsSL --max-time 120 \
     "https://github.com/jelte1/SpotiFLAC-Command-Line-Interface/releases/download/${RELEASE}/${SPOTIFLAC_BIN}" \
     -o "/opt/spotiflac/${SPOTIFLAC_BIN}"
   chmod +x "/opt/spotiflac/${SPOTIFLAC_BIN}"
@@ -60,13 +65,16 @@ function update_script() {
   msg_ok "Updated SpotiFLAC CLI to ${RELEASE}"
 
   msg_info "Updating Windscribe VPN CLI"
-  WS_RELEASE=$(curl -fsSL "https://api.github.com/repos/Windscribe/Desktop-App/releases/latest" \
-    | grep '"tag_name"' \
-    | sed -E 's/.*"([^"]+)".*/\1/')
+  WS_RELEASE=""
+  WS_API=$(curl -fsSL --max-time 10 \
+    "https://api.github.com/repos/Windscribe/Desktop-App/releases/latest" \
+    2>/dev/null || true)
+  [[ -n "$WS_API" ]] && WS_RELEASE=$(echo "$WS_API" | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/' || true)
+  [[ -z "$WS_RELEASE" ]] && WS_RELEASE="v2.20.7"
   WS_VER="${WS_RELEASE#v}"
   WS_DEB="windscribe-cli_${WS_VER}_${WINDSCRIBE_ARCH}.deb"
   WS_URL="https://github.com/Windscribe/Desktop-App/releases/download/${WS_RELEASE}/${WS_DEB}"
-  curl -fsSL "${WS_URL}" -o /tmp/windscribe_install.deb
+  curl -fsSL --max-time 120 "${WS_URL}" -o /tmp/windscribe_install.deb
   dpkg -i /tmp/windscribe_install.deb &>/dev/null || true
   apt-get install -f -y &>/dev/null
   rm -f /tmp/windscribe_install.deb
