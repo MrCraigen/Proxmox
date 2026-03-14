@@ -38,21 +38,31 @@ else
 fi
 msg_info "Detected architecture: ${ARCH} (${ARCH_LABEL})"
 
+# Wait for network / DNS to become available inside the container
+msg_info "Waiting for network connectivity"
+WAIT_SECONDS=0
+MAX_WAIT=60
+until curl -fsSL --max-time 5 --head "https://github.com" &>/dev/null; do
+  if (( WAIT_SECONDS >= MAX_WAIT )); then
+    msg_error "Network not available after ${MAX_WAIT}s — cannot reach github.com"
+    exit 1
+  fi
+  sleep 2
+  WAIT_SECONDS=$(( WAIT_SECONDS + 2 ))
+done
+msg_ok "Network is available"
+
 # Install SpotiFLAC CLI
 msg_info "Installing SpotiFLAC CLI"
 
 # Pinned fallback version — update_script() fetches dynamically on future upgrades
 SPOTIFLAC_FALLBACK="v1.0.23"
 
-SPOTIFLAC_RELEASE=""
-SF_API_RESP=$(curl -fsSL --max-time 10 \
+SPOTIFLAC_RELEASE=$(curl -fsSL --max-time 10 \
   "https://api.github.com/repos/jelte1/SpotiFLAC-Command-Line-Interface/releases/latest" \
-  2>/dev/null || true)
-if [[ -n "$SF_API_RESP" ]]; then
-  SPOTIFLAC_RELEASE=$(echo "$SF_API_RESP" | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/' || true)
-fi
+  2>/dev/null | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/' || true)
+
 [[ -z "$SPOTIFLAC_RELEASE" ]] && SPOTIFLAC_RELEASE="$SPOTIFLAC_FALLBACK"
-msg_info "Using SpotiFLAC version: ${SPOTIFLAC_RELEASE}"
 
 mkdir -p /opt/spotiflac
 
@@ -82,15 +92,11 @@ msg_info "Installing Windscribe VPN CLI (${ARCH_LABEL})"
 # Pinned fallback version — update_script() fetches dynamically on future upgrades
 WS_FALLBACK="v2.20.7"
 
-WS_RELEASE=""
-WS_API_RESP=$(curl -fsSL --max-time 10 \
+WS_RELEASE=$(curl -fsSL --max-time 10 \
   "https://api.github.com/repos/Windscribe/Desktop-App/releases/latest" \
-  2>/dev/null || true)
-if [[ -n "$WS_API_RESP" ]]; then
-  WS_RELEASE=$(echo "$WS_API_RESP" | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/' || true)
-fi
+  2>/dev/null | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/' || true)
+
 [[ -z "$WS_RELEASE" ]] && WS_RELEASE="$WS_FALLBACK"
-msg_info "Using Windscribe version: ${WS_RELEASE}"
 
 WS_VER="${WS_RELEASE#v}"
 WS_DEB="windscribe-cli_${WS_VER}_${WINDSCRIBE_ARCH}.deb"
