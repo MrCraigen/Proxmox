@@ -34,11 +34,11 @@ ARCH=$(uname -m)
 if [[ "$ARCH" == "x86_64" ]]; then
   ARCH_LABEL="amd64"
   SPOTIFLAC_BIN="SpotiFLAC-Linux-x86_64"
-  WINDSCRIBE_URL="https://windscribe.com/install/desktop/deb_x64/beta"
+  WINDSCRIBE_ARCH="amd64"
 elif [[ "$ARCH" == "aarch64" ]]; then
   ARCH_LABEL="arm64"
   SPOTIFLAC_BIN="SpotiFLAC-Linux-arm64"
-  WINDSCRIBE_URL="https://windscribe.com/install/desktop/deb_arm64/beta"
+  WINDSCRIBE_ARCH="arm64"
 else
   msg_error "Unsupported architecture: $ARCH (only x86_64 and aarch64 are supported)"
   exit 1
@@ -75,19 +75,39 @@ mkdir -p /mnt/music
 chmod 755 /mnt/music
 msg_ok "Created /mnt/music"
 
-# ── Install Windscribe VPN ────────────────────────────────────────────────────
-msg_info "Installing Windscribe VPN (${ARCH_LABEL})"
-curl -fsSL "${WINDSCRIBE_URL}" -o /tmp/windscribe_install.deb
+# ── Install Windscribe VPN CLI ────────────────────────────────────────────────
+msg_info "Installing Windscribe VPN CLI (${ARCH_LABEL})"
+
+# Install dependencies Windscribe needs
+$STD apt-get install -y openvpn resolvconf net-tools iproute2 wireguard-tools
+
+# Fetch latest stable release tag from GitHub API
+WS_RELEASE=$(curl -fsSL "https://api.github.com/repos/Windscribe/Desktop-App/releases/latest" \
+  | grep '"tag_name"' \
+  | sed -E 's/.*"([^"]+)".*/\1/')
+
+if [[ -z "$WS_RELEASE" ]]; then
+  msg_error "Failed to fetch Windscribe release version from GitHub API"
+  exit 1
+fi
+
+# Version number without leading 'v' for filename
+WS_VER="${WS_RELEASE#v}"
+WS_DEB="windscribe-cli_${WS_VER}_${WINDSCRIBE_ARCH}.deb"
+WS_URL="https://github.com/Windscribe/Desktop-App/releases/download/${WS_RELEASE}/${WS_DEB}"
+
+curl -fsSL "${WS_URL}" -o /tmp/windscribe_install.deb
 
 if [[ ! -f /tmp/windscribe_install.deb ]] || [[ ! -s /tmp/windscribe_install.deb ]]; then
-  msg_error "Failed to download Windscribe package"
+  msg_error "Failed to download Windscribe package from: ${WS_URL}"
   exit 1
 fi
 
 $STD dpkg -i /tmp/windscribe_install.deb || true
 $STD apt-get install -f -y
 rm -f /tmp/windscribe_install.deb
-msg_ok "Installed Windscribe VPN"
+$STD systemctl enable windscribe 2>/dev/null || true
+msg_ok "Installed Windscribe VPN CLI ${WS_RELEASE} (${ARCH_LABEL})"
 
 # ── Windscribe Firewall Bypass (headless helper) ──────────────────────────────
 # Allow Windscribe firewall rules to not block the container's internal traffic
