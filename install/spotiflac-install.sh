@@ -39,12 +39,39 @@ fi
 msg_info "Detected architecture: ${ARCH} (${ARCH_LABEL})"
 
 # Wait for network / DNS to become available inside the container
+# Polls every 2s for up to 90s, then prints diagnostics if still failing
 msg_info "Waiting for network connectivity"
 WAIT_SECONDS=0
-MAX_WAIT=60
+MAX_WAIT=90
+# Fix broken systemd-resolved stub -- use real upstream DNS
+if grep -q "127.0.0.53" /etc/resolv.conf 2>/dev/null; then
+  rm -f /etc/resolv.conf
+  printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" > /etc/resolv.conf
+  chattr +i /etc/resolv.conf
+fi
+
 until curl -fsSL --max-time 5 --head "https://github.com" &>/dev/null; do
   if (( WAIT_SECONDS >= MAX_WAIT )); then
-    msg_error "Network not available after ${MAX_WAIT}s — cannot reach github.com"
+    echo ""
+    msg_info "Network diagnostics:"
+    echo "  -- IP addresses --"
+    ip -4 addr show 2>/dev/null || echo "  (ip command failed)"
+    echo "  -- Default route --"
+    ip route show default 2>/dev/null || echo "  (no default route)"
+    echo "  -- /etc/resolv.conf --"
+    cat /etc/resolv.conf 2>/dev/null || echo "  (missing)"
+    echo "  -- DNS test (1.1.1.1) --"
+    curl -fsSL --max-time 5 --head "https://1.1.1.1" &>/dev/null \
+      && echo "  IP reachable (DNS is the problem)" \
+      || echo "  IP NOT reachable (no route to internet)"
+    echo "  -- Ping gateway --"
+    GW=$(ip route show default 2>/dev/null | awk '/default/ {print $3; exit}')
+    if [[ -n "$GW" ]]; then
+      ping -c 2 -W 2 "$GW" 2>/dev/null && echo "  Gateway $GW reachable" || echo "  Gateway $GW NOT reachable"
+    else
+      echo "  No gateway found"
+    fi
+    msg_error "Network not available after ${MAX_WAIT}s — see diagnostics above"
     exit 1
   fi
   sleep 2
@@ -55,13 +82,10 @@ msg_ok "Network is available"
 # Install SpotiFLAC CLI
 msg_info "Installing SpotiFLAC CLI"
 
-# Pinned fallback version — update_script() fetches dynamically on future upgrades
 SPOTIFLAC_FALLBACK="v1.0.23"
-
 SPOTIFLAC_RELEASE=$(curl -fsSL --max-time 10 \
   "https://api.github.com/repos/jelte1/SpotiFLAC-Command-Line-Interface/releases/latest" \
   2>/dev/null | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/' || true)
-
 [[ -z "$SPOTIFLAC_RELEASE" ]] && SPOTIFLAC_RELEASE="$SPOTIFLAC_FALLBACK"
 
 mkdir -p /opt/spotiflac
@@ -89,13 +113,10 @@ msg_ok "Created /mnt/music"
 # Install Windscribe VPN CLI
 msg_info "Installing Windscribe VPN CLI (${ARCH_LABEL})"
 
-# Pinned fallback version — update_script() fetches dynamically on future upgrades
 WS_FALLBACK="v2.20.7"
-
 WS_RELEASE=$(curl -fsSL --max-time 10 \
   "https://api.github.com/repos/Windscribe/Desktop-App/releases/latest" \
   2>/dev/null | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/' || true)
-
 [[ -z "$WS_RELEASE" ]] && WS_RELEASE="$WS_FALLBACK"
 
 WS_VER="${WS_RELEASE#v}"
@@ -115,7 +136,6 @@ rm -f /tmp/windscribe_install.deb
 $STD systemctl enable windscribe 2>/dev/null || true
 msg_ok "Installed Windscribe VPN CLI ${WS_RELEASE} (${ARCH_LABEL})"
 
-# Disable kill-switch by default so container traffic works before VPN login
 if command -v windscribe-cli &>/dev/null; then
   windscribe-cli firewall off &>/dev/null || true
 fi
@@ -147,22 +167,14 @@ RestartSec=30
 WantedBy=multi-user.target
 SVCEOF
 
-# Create default environment file
 cat > /opt/spotiflac/spotiflac.env << 'ENVEOF'
 # SpotiFLAC environment configuration
 # Edit this file, then run:
 #   systemctl daemon-reload && systemctl restart spotiflac
 
-# Spotify URL to sync (playlist, album, or track)
 SPOTIFLAC_URL=
-
-# Output directory for downloaded FLAC files
 SPOTIFLAC_OUTPUT_DIR=/mnt/music
-
-# Music service: tidal, qobuz, deezer, amazon
 SPOTIFLAC_SERVICE=tidal
-
-# Re-check interval in minutes (0 = run once and exit)
 SPOTIFLAC_LOOP=60
 ENVEOF
 
