@@ -47,7 +47,6 @@ MAX_WAIT=90
 if grep -q "127.0.0.53" /etc/resolv.conf 2>/dev/null; then
   rm -f /etc/resolv.conf
   printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" > /etc/resolv.conf
-  chattr +i /etc/resolv.conf
 fi
 
 until curl -fsSL --max-time 5 --head "https://github.com" &>/dev/null; do
