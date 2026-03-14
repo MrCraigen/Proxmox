@@ -15,8 +15,6 @@ var_disk="${var_disk:-8}"
 var_os="${var_os:-debian}"
 var_version="${var_version:-12}"
 var_unprivileged="${var_unprivileged:-1}"
-var_tun="${var_tun:-yes}"           # Required for Windscribe VPN
-var_ns="${var_ns:-1.1.1.1}"         # Force real DNS -- avoids broken systemd-resolved stub
 
 header_info "$APP"
 variables
