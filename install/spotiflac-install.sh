@@ -133,7 +133,6 @@ fi
 dpkg --force-depends -i /tmp/windscribe_install.deb &>/dev/null || true
 apt-get install -f -y &>/dev/null
 rm -f /tmp/windscribe_install.deb
-$STD systemctl enable windscribe 2>/dev/null || true
 msg_ok "Installed Windscribe VPN CLI ${WS_RELEASE} (${ARCH_LABEL})"
 
 if command -v windscribe-cli &>/dev/null; then
