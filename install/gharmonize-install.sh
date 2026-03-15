@@ -6,12 +6,27 @@
 # Sources:
 #   Gharmonize : https://github.com/G-grbz/Gharmonize
 #   Windscribe  : https://windscribe.com/download?cpid=homepage
+
+# ==============================================================================
+# DNS REPAIR — must run BEFORE source/catch_errors/set -e
+#
+# The framework's catch_errors() enables set -Eeuo pipefail + ERR trap.
+# Any failed command after that point kills the script immediately.
+# We fix DNS here, while the shell is still lenient.
+#
+# NOTE: getent/ping can succeed via /etc/hosts even when external DNS is dead,
+# so we probe with a real curl call.
+# ==============================================================================
 _write_dns() {
+  # Remove immutable flag if set (chattr -i is a no-op if not set)
+  chattr -i /etc/resolv.conf 2>/dev/null || true
   cat > /etc/resolv.conf <<'RESOLV'
 nameserver 1.1.1.1
 nameserver 8.8.8.8
 options edns0 trust-ad
 RESOLV
+  # Lock the file so no apt hook, postinstall script, or daemon can overwrite it
+  chattr +i /etc/resolv.conf 2>/dev/null || true
 }
 
 _check_dns() {
@@ -241,6 +256,9 @@ MOTD
 
 motd_ssh
 customize
+
+# Unlock resolv.conf before final apt cleanup (apt may need to touch networking)
+chattr -i /etc/resolv.conf 2>/dev/null || true
 
 msg_info "Cleaning up"
 $STD apt-get autoremove -y
