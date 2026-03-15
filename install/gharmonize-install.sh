@@ -193,13 +193,26 @@ $STD dpkg --force-depends -i /tmp/windscribe_install.deb || true
 $STD apt-get install -f -y
 rm -f /tmp/windscribe_install.deb
 
-# Disable firewall immediately — default "auto" mode blocks all non-VPN traffic
-# which would break the container when no VPN is connected
-if command -v windscribe-cli &>/dev/null; then
-  windscribe-cli firewall off &>/dev/null || true
-fi
+# ─── Windscribe service user ──────────────────────────────────────────────────
+# windscribe-cli refuses to run as root. Create a dedicated system user.
+useradd --system --shell /bin/bash --create-home windscribe 2>/dev/null || true
+
+# Disable firewall as the windscribe user — prevents blocking all non-VPN traffic
+su - windscribe -c "windscribe-cli firewall off" &>/dev/null || true
 
 msg_ok "Installed Windscribe VPN CLI ${WS_RELEASE} (${ARCH_LABEL})"
+
+# ─── ws helper ───────────────────────────────────────────────────────────────
+# Wraps windscribe-cli to always run as the windscribe user.
+# Usage: ws login <user> <pass> | ws connect best | ws status | ws disconnect
+msg_info "Creating ws helper"
+cat > /usr/local/bin/ws <<'WSEOF'
+#!/usr/bin/env bash
+# ws — run windscribe-cli as the windscribe user (refuses to run as root)
+exec su - windscribe -c "windscribe-cli $*"
+WSEOF
+chmod +x /usr/local/bin/ws
+msg_ok "Created ws helper (/usr/local/bin/ws)"
 
 # ─── MOTD ─────────────────────────────────────────────────────────────────────
 cat >> /etc/motd <<'MOTD'
@@ -209,11 +222,11 @@ cat >> /etc/motd <<'MOTD'
  ║  Edit /opt/gharmonize/.env to set ADMIN_PASSWORD         ║
  ║  then: systemctl restart gharmonize                      ║
  ║                                                          ║
- ║  Windscribe VPN CLI:                                     ║
- ║    windscribe-cli login <user> <password>                ║
- ║    windscribe-cli connect best                           ║
- ║    windscribe-cli status                                 ║
- ║    windscribe-cli disconnect                             ║
+ ║  Windscribe VPN (run via ws helper, not as root):        ║
+ ║    ws login <user> <password>                            ║
+ ║    ws connect best                                       ║
+ ║    ws status                                             ║
+ ║    ws disconnect                                         ║
  ║                                                          ║
  ║  Supported arches: amd64 · arm64                        ║
  ╚══════════════════════════════════════════════════════════╝
