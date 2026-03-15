@@ -7,55 +7,6 @@
 #   Gharmonize : https://github.com/G-grbz/Gharmonize
 #   Windscribe  : https://windscribe.com/download?cpid=homepage
 
-# ==============================================================================
-# DNS REPAIR — must run BEFORE source/catch_errors/set -e
-#
-# The framework's catch_errors() enables set -Eeuo pipefail + ERR trap.
-# Any failed command after that point kills the script immediately.
-# We fix DNS here, while the shell is still lenient.
-#
-# NOTE: getent/ping can succeed via /etc/hosts even when external DNS is dead,
-# so we probe with a real curl call.
-# ==============================================================================
-_write_dns() {
-  # Remove immutable flag if set (chattr -i is a no-op if not set)
-  chattr -i /etc/resolv.conf 2>/dev/null || true
-  cat > /etc/resolv.conf <<'RESOLV'
-nameserver 1.1.1.1
-nameserver 8.8.8.8
-options edns0 trust-ad
-RESOLV
-  # Lock the file so no apt hook, postinstall script, or daemon can overwrite it
-  chattr +i /etc/resolv.conf 2>/dev/null || true
-}
-
-_check_dns() {
-  curl -fsSL --max-time 6 --head https://deb.debian.org/ -o /dev/null 2>/dev/null
-}
-
-_fix_dns() {
-  if _check_dns; then
-    return 0
-  fi
-  _write_dns
-  sleep 1
-  if ! _check_dns; then
-    echo ""
-    echo " ✖️  DNS is not working inside this container."
-    echo "     Tried nameservers: 1.1.1.1 and 8.8.8.8"
-    echo ""
-    echo "     Fix on the Proxmox HOST before re-running:"
-    echo "       pct set <CTID> --nameserver 1.1.1.1"
-    echo "     Or set DNS in the CT's network/DNS options in the Proxmox UI."
-    echo ""
-    exit 1
-  fi
-}
-_fix_dns
-
-# ==============================================================================
-# Framework bootstrap — strict error handling starts here
-# ==============================================================================
 source /dev/stdin <<< "$FUNCTIONS_FILE_PATH"
 color
 verb_ip6
@@ -64,11 +15,6 @@ setting_up_container
 network_check
 update_os
 
-# ─── Dependencies ─────────────────────────────────────────────────────────────
-# NOTE: resolvconf is intentionally excluded.
-# Installing resolvconf overwrites /etc/resolv.conf as a post-install hook,
-# which silently kills external DNS inside the LXC container.
-# OpenVPN (required by Windscribe) does not need resolvconf in this setup.
 msg_info "Installing Dependencies"
 $STD apt-get install -y \
   curl \
@@ -80,26 +26,69 @@ $STD apt-get install -y \
   openssl \
   iptables \
   openvpn \
+  resolvconf \
+  net-tools \
+  iproute2 \
   systemd
 msg_ok "Installed Dependencies"
 
-# ─── Re-pin DNS ───────────────────────────────────────────────────────────────
-# apt post-install hooks (dbus, libc-bin triggers, etc.) can regenerate
-# /etc/resolv.conf after the dependency install block above.
-# Re-write our static nameservers now, before any external curl/git calls.
-msg_info "Re-pinning DNS after apt"
-_write_dns
-msg_ok "DNS re-pinned (1.1.1.1 / 8.8.8.8)"
-
 # ─── Detect Architecture ──────────────────────────────────────────────────────
-ARCH=$(dpkg --print-architecture)   # amd64 | arm64
-msg_info "Detected architecture: ${ARCH}"
+ARCH=$(uname -m)
+if [[ "$ARCH" == "x86_64" ]]; then
+  ARCH_LABEL="amd64"
+  WINDSCRIBE_ARCH="amd64"
+elif [[ "$ARCH" == "aarch64" ]]; then
+  ARCH_LABEL="arm64"
+  WINDSCRIBE_ARCH="arm64"
+else
+  msg_error "Unsupported architecture: $ARCH (only x86_64 and aarch64 are supported)"
+  exit 1
+fi
+msg_info "Detected architecture: ${ARCH} (${ARCH_LABEL})"
+
+# ─── Wait for network / DNS ───────────────────────────────────────────────────
+# Polls every 2s for up to 90s. Fixes systemd-resolved stub if present.
+# This is the proven pattern from spotiflac-install.sh.
+msg_info "Waiting for network connectivity"
+WAIT_SECONDS=0
+MAX_WAIT=90
+
+if grep -q "127.0.0.53" /etc/resolv.conf 2>/dev/null; then
+  rm -f /etc/resolv.conf
+  printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" > /etc/resolv.conf
+fi
+
+until curl -fsSL --max-time 5 --head "https://github.com" &>/dev/null; do
+  if (( WAIT_SECONDS >= MAX_WAIT )); then
+    echo ""
+    msg_info "Network diagnostics:"
+    echo "  -- IP addresses --"
+    ip -4 addr show 2>/dev/null || echo "  (ip command failed)"
+    echo "  -- Default route --"
+    ip route show default 2>/dev/null || echo "  (no default route)"
+    echo "  -- /etc/resolv.conf --"
+    cat /etc/resolv.conf 2>/dev/null || echo "  (missing)"
+    echo "  -- DNS test via IP (bypass DNS) --"
+    curl -fsSL --max-time 5 --head "https://1.1.1.1" &>/dev/null \
+      && echo "  IP reachable — DNS is the problem" \
+      || echo "  IP NOT reachable — no route to internet"
+    GW=$(ip route show default 2>/dev/null | awk '/default/ {print $3; exit}')
+    if [[ -n "$GW" ]]; then
+      ping -c 2 -W 2 "$GW" 2>/dev/null \
+        && echo "  Gateway $GW reachable" \
+        || echo "  Gateway $GW NOT reachable"
+    fi
+    msg_error "Network not available after ${MAX_WAIT}s — see diagnostics above"
+    exit 1
+  fi
+  sleep 2
+  WAIT_SECONDS=$(( WAIT_SECONDS + 2 ))
+done
+msg_ok "Network is available"
 
 # ─── Node.js 20.x ─────────────────────────────────────────────────────────────
-# Download the NodeSource setup script to a temp file, then execute separately.
-# Avoids the "syntax error / command not found" from $STD (silent()) wrapping
-# a pipe-to-bash — the NodeSource script emits ANSI escape sequences that
-# silent() tries to parse as shell commands when used with | bash -.
+# Download setup script to a temp file first — avoids $STD (silent()) breaking
+# when wrapping a pipe-to-bash (ANSI escape sequences cause "syntax error").
 msg_info "Installing Node.js 20.x"
 curl -fsSL https://deb.nodesource.com/setup_20.x -o /tmp/nodesource_setup.sh
 $STD bash /tmp/nodesource_setup.sh
@@ -131,7 +120,6 @@ $STD git clone https://github.com/G-grbz/Gharmonize /opt/gharmonize
 mkdir -p /opt/gharmonize/{uploads,outputs,temp,cookies,local-inputs}
 touch /opt/gharmonize/cookies/cookies.txt
 
-# Capture dynamic values before heredoc (subshell expansion breaks inside EOF)
 APP_SECRET=$(openssl rand -hex 32)
 FFMPEG_PATH=$(which ffmpeg)
 
@@ -149,11 +137,7 @@ FFMPEG_BIN=${FFMPEG_PATH}
 EOF
 
 cd /opt/gharmonize
-# Re-pin DNS before npm — postinstall scripts can clobber /etc/resolv.conf
-_write_dns
 $STD npm install --omit=dev
-# Re-pin once more in case a postinstall script clobbered it
-_write_dns
 msg_ok "Installed Gharmonize"
 
 # ─── Systemd Service — Gharmonize ─────────────────────────────────────────────
@@ -183,58 +167,39 @@ systemctl enable --now gharmonize &>/dev/null
 msg_ok "Created and Started Gharmonize Service"
 
 # ─── Windscribe CLI ───────────────────────────────────────────────────────────
-# Official Windscribe apt repo supports both amd64 and arm64 on Debian/Ubuntu.
-# Re-pin DNS here — npm post-install scripts can disturb /etc/resolv.conf.
-msg_info "Installing Windscribe CLI (${ARCH})"
-_write_dns
+# Download the .deb directly from GitHub Releases — same approach as
+# spotiflac-install.sh. Avoids the apt repo entirely (no GPG key import,
+# no extra apt source, no DNS dependency on repo.windscribe.com at install time).
+msg_info "Installing Windscribe VPN CLI (${ARCH_LABEL})"
 
-if [[ "$ARCH" == "amd64" || "$ARCH" == "arm64" ]]; then
-  WS_ARCH="$ARCH"
-else
-  msg_error "Unsupported architecture for Windscribe: ${ARCH}"
+WS_FALLBACK="v2.20.7"
+WS_RELEASE=$(curl -fsSL --max-time 10 \
+  "https://api.github.com/repos/Windscribe/Desktop-App/releases/latest" \
+  2>/dev/null | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/' || true)
+[[ -z "$WS_RELEASE" ]] && WS_RELEASE="$WS_FALLBACK"
+
+WS_VER="${WS_RELEASE#v}"
+WS_DEB="windscribe-cli_${WS_VER}_${WINDSCRIBE_ARCH}.deb"
+WS_URL="https://github.com/Windscribe/Desktop-App/releases/download/${WS_RELEASE}/${WS_DEB}"
+
+curl -fsSL --max-time 120 "${WS_URL}" -o /tmp/windscribe_install.deb
+
+if [[ ! -s /tmp/windscribe_install.deb ]]; then
+  msg_error "Failed to download Windscribe package from: ${WS_URL}"
   exit 1
 fi
 
-# Download the GPG key to a temp file first.
-# Piping curl directly into gpg means a DNS/network failure produces an empty
-# stream which gpg then errors on with exit code 2 ("no valid OpenPGP data").
-# Downloading first lets curl fail loudly and early with its own exit code.
-curl -fsSL "https://repo.windscribe.com/debian/windscribe.gpg" \
-  -o /tmp/windscribe.gpg
-gpg --dearmor < /tmp/windscribe.gpg \
-  > /usr/share/keyrings/windscribe-archive-keyring.gpg
-rm -f /tmp/windscribe.gpg
+$STD dpkg --force-depends -i /tmp/windscribe_install.deb || true
+$STD apt-get install -f -y
+rm -f /tmp/windscribe_install.deb
 
-echo "deb [arch=${WS_ARCH} signed-by=/usr/share/keyrings/windscribe-archive-keyring.gpg] \
-https://repo.windscribe.com/debian/ stable main" \
-  > /etc/apt/sources.list.d/windscribe.list
+# Disable firewall immediately — default "auto" mode blocks all non-VPN traffic
+# which would break the container when no VPN is connected
+if command -v windscribe-cli &>/dev/null; then
+  windscribe-cli firewall off &>/dev/null || true
+fi
 
-$STD apt-get update
-$STD apt-get install -y windscribe-cli
-systemctl enable windscribe &>/dev/null || true
-msg_ok "Installed Windscribe CLI"
-
-# ─── Systemd Service — Windscribe firewall post-init ──────────────────────────
-# Windscribe's default "auto" firewall kills ALL non-VPN traffic in LXC,
-# breaking the container entirely. This one-shot service turns it off at boot
-# after windscribed is up, so normal traffic works when no VPN is connected.
-msg_info "Creating Windscribe post-init Service"
-cat > /etc/systemd/system/windscribe-postinit.service <<'EOF'
-[Unit]
-Description=Windscribe firewall off (headless LXC safe mode)
-After=windscribe.service
-Requires=windscribe.service
-
-[Service]
-Type=oneshot
-ExecStart=/usr/bin/windscribe firewall off
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF
-systemctl enable windscribe-postinit &>/dev/null || true
-msg_ok "Windscribe post-init Service created"
+msg_ok "Installed Windscribe VPN CLI ${WS_RELEASE} (${ARCH_LABEL})"
 
 # ─── MOTD ─────────────────────────────────────────────────────────────────────
 cat >> /etc/motd <<'MOTD'
@@ -245,9 +210,10 @@ cat >> /etc/motd <<'MOTD'
  ║  then: systemctl restart gharmonize                      ║
  ║                                                          ║
  ║  Windscribe VPN CLI:                                     ║
- ║    windscribe login <user> <password>                    ║
- ║    windscribe connect                                    ║
- ║    windscribe status                                     ║
+ ║    windscribe-cli login <user> <password>                ║
+ ║    windscribe-cli connect best                           ║
+ ║    windscribe-cli status                                 ║
+ ║    windscribe-cli disconnect                             ║
  ║                                                          ║
  ║  Supported arches: amd64 · arm64                        ║
  ╚══════════════════════════════════════════════════════════╝
@@ -257,10 +223,7 @@ MOTD
 motd_ssh
 customize
 
-# Unlock resolv.conf before final apt cleanup (apt may need to touch networking)
-chattr -i /etc/resolv.conf 2>/dev/null || true
-
 msg_info "Cleaning up"
 $STD apt-get autoremove -y
-$STD apt-get clean
+$STD apt-get autoclean -y
 msg_ok "Cleaned"
