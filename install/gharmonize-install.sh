@@ -9,38 +9,40 @@
 
 # ==============================================================================
 # DNS REPAIR — must run BEFORE source/catch_errors/set -e
-# The framework's catch_errors() enables set -Eeuo pipefail + ERR trap, which
-# means any failed command kills the script instantly.  We fix DNS first, while
-# the shell is still in a lenient state, so every subsequent curl/git/apt call
-# can actually reach the internet.
-# getent can succeed via /etc/hosts even when external DNS is broken, so we
-# use curl with a short timeout as the real probe.
+#
+# The framework's catch_errors() enables set -Eeuo pipefail + ERR trap.
+# Any failed command after that point kills the script immediately.
+# We fix DNS here, while the shell is still lenient.
+#
+# NOTE: getent/ping can succeed via /etc/hosts even when external DNS is dead,
+# so we probe with a real curl call.
 # ==============================================================================
-_fix_dns() {
-  # Test with a real external host using curl (not getent/ping which can use /etc/hosts)
-  if curl -fsSL --max-time 5 --head https://deb.debian.org/ -o /dev/null 2>/dev/null; then
-    return 0  # DNS is fine
-  fi
-
-  # DNS broken — write fallback resolv.conf (Cloudflare + Google)
+_write_dns() {
   cat > /etc/resolv.conf <<'RESOLV'
 nameserver 1.1.1.1
 nameserver 8.8.8.8
 options edns0 trust-ad
 RESOLV
+}
 
-  # Give the kernel a moment to pick up the new config
+_check_dns() {
+  curl -fsSL --max-time 6 --head https://deb.debian.org/ -o /dev/null 2>/dev/null
+}
+
+_fix_dns() {
+  if _check_dns; then
+    return 0
+  fi
+  _write_dns
   sleep 1
-
-  # Final check — if still broken, bail out with a human-readable message
-  if ! curl -fsSL --max-time 10 --head https://deb.debian.org/ -o /dev/null 2>/dev/null; then
+  if ! _check_dns; then
     echo ""
     echo " ✖️  DNS is not working inside this container."
-    echo "     Tried: 1.1.1.1 and 8.8.8.8"
+    echo "     Tried nameservers: 1.1.1.1 and 8.8.8.8"
     echo ""
     echo "     Fix on the Proxmox HOST before re-running:"
     echo "       pct set <CTID> --nameserver 1.1.1.1"
-    echo "     Or set DNS in the network bridge / LXC advanced options."
+    echo "     Or set DNS in the CT's network/DNS options in the Proxmox UI."
     echo ""
     exit 1
   fi
@@ -48,7 +50,7 @@ RESOLV
 _fix_dns
 
 # ==============================================================================
-# Framework bootstrap — NOW safe to enable strict error handling
+# Framework bootstrap — strict error handling starts here
 # ==============================================================================
 source /dev/stdin <<< "$FUNCTIONS_FILE_PATH"
 color
@@ -59,6 +61,10 @@ network_check
 update_os
 
 # ─── Dependencies ─────────────────────────────────────────────────────────────
+# NOTE: resolvconf is intentionally excluded.
+# Installing resolvconf overwrites /etc/resolv.conf as a post-install hook,
+# which silently kills external DNS inside the LXC container.
+# OpenVPN (required by Windscribe) does not need resolvconf in this setup.
 msg_info "Installing Dependencies"
 $STD apt-get install -y \
   curl \
@@ -70,19 +76,26 @@ $STD apt-get install -y \
   openssl \
   iptables \
   openvpn \
-  resolvconf \
   systemd
 msg_ok "Installed Dependencies"
+
+# ─── Re-pin DNS ───────────────────────────────────────────────────────────────
+# apt post-install hooks (dbus, libc-bin triggers, etc.) can regenerate
+# /etc/resolv.conf after the dependency install block above.
+# Re-write our static nameservers now, before any external curl/git calls.
+msg_info "Re-pinning DNS after apt"
+_write_dns
+msg_ok "DNS re-pinned (1.1.1.1 / 8.8.8.8)"
 
 # ─── Detect Architecture ──────────────────────────────────────────────────────
 ARCH=$(dpkg --print-architecture)   # amd64 | arm64
 msg_info "Detected architecture: ${ARCH}"
 
 # ─── Node.js 20.x ─────────────────────────────────────────────────────────────
-# Download the NodeSource setup script to a temp file and execute it separately.
-# Avoids the "syntax error / command not found" caused by $STD (silent()) wrapping
-# a pipe-to-bash call — the NodeSource script emits ANSI control sequences that
-# the silent() wrapper tries to parse as shell commands when used with | bash -.
+# Download the NodeSource setup script to a temp file, then execute separately.
+# Avoids the "syntax error / command not found" from $STD (silent()) wrapping
+# a pipe-to-bash — the NodeSource script emits ANSI escape sequences that
+# silent() tries to parse as shell commands when used with | bash -.
 msg_info "Installing Node.js 20.x"
 curl -fsSL https://deb.nodesource.com/setup_20.x -o /tmp/nodesource_setup.sh
 $STD bash /tmp/nodesource_setup.sh
@@ -97,7 +110,6 @@ msg_ok "Installed ffmpeg"
 
 # ─── yt-dlp ───────────────────────────────────────────────────────────────────
 msg_info "Installing yt-dlp"
-# Do NOT wrap with $STD — curl output is the binary itself, not noise
 curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
   -o /usr/local/bin/yt-dlp
 chmod a+rx /usr/local/bin/yt-dlp
@@ -115,7 +127,7 @@ $STD git clone https://github.com/G-grbz/Gharmonize /opt/gharmonize
 mkdir -p /opt/gharmonize/{uploads,outputs,temp,cookies,local-inputs}
 touch /opt/gharmonize/cookies/cookies.txt
 
-# Capture paths before heredoc to avoid subshell expansion inside EOF
+# Capture dynamic values before heredoc (subshell expansion breaks inside EOF)
 APP_SECRET=$(openssl rand -hex 32)
 FFMPEG_PATH=$(which ffmpeg)
 
@@ -173,7 +185,7 @@ else
   exit 1
 fi
 
-# Import signing key — do NOT use $STD, curl output is piped directly to gpg
+# Do NOT wrap with $STD — curl output is piped directly to gpg
 curl -fsSL "https://repo.windscribe.com/debian/windscribe.gpg" \
   | gpg --dearmor -o /usr/share/keyrings/windscribe-archive-keyring.gpg
 
@@ -188,9 +200,8 @@ msg_ok "Installed Windscribe CLI"
 
 # ─── Systemd Service — Windscribe firewall post-init ──────────────────────────
 # Windscribe's default "auto" firewall kills ALL non-VPN traffic in LXC,
-# breaking the container entirely.  This one-shot service disables it at boot
-# after windscribed is fully up, so normal traffic still works when no VPN
-# is connected.
+# breaking the container entirely. This one-shot service turns it off at boot
+# after windscribed is up, so normal traffic works when no VPN is connected.
 msg_info "Creating Windscribe post-init Service"
 cat > /etc/systemd/system/windscribe-postinit.service <<'EOF'
 [Unit]
