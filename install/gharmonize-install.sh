@@ -6,17 +6,6 @@
 # Sources:
 #   Gharmonize : https://github.com/G-grbz/Gharmonize
 #   Windscribe  : https://windscribe.com/download?cpid=homepage
-
-# ==============================================================================
-# DNS REPAIR — must run BEFORE source/catch_errors/set -e
-#
-# The framework's catch_errors() enables set -Eeuo pipefail + ERR trap.
-# Any failed command after that point kills the script immediately.
-# We fix DNS here, while the shell is still lenient.
-#
-# NOTE: getent/ping can succeed via /etc/hosts even when external DNS is dead,
-# so we probe with a real curl call.
-# ==============================================================================
 _write_dns() {
   cat > /etc/resolv.conf <<'RESOLV'
 nameserver 1.1.1.1
@@ -145,7 +134,11 @@ FFMPEG_BIN=${FFMPEG_PATH}
 EOF
 
 cd /opt/gharmonize
+# Re-pin DNS before npm — postinstall scripts can clobber /etc/resolv.conf
+_write_dns
 $STD npm install --omit=dev
+# Re-pin once more in case a postinstall script clobbered it
+_write_dns
 msg_ok "Installed Gharmonize"
 
 # ─── Systemd Service — Gharmonize ─────────────────────────────────────────────
@@ -176,7 +169,9 @@ msg_ok "Created and Started Gharmonize Service"
 
 # ─── Windscribe CLI ───────────────────────────────────────────────────────────
 # Official Windscribe apt repo supports both amd64 and arm64 on Debian/Ubuntu.
+# Re-pin DNS here — npm post-install scripts can disturb /etc/resolv.conf.
 msg_info "Installing Windscribe CLI (${ARCH})"
+_write_dns
 
 if [[ "$ARCH" == "amd64" || "$ARCH" == "arm64" ]]; then
   WS_ARCH="$ARCH"
@@ -185,9 +180,15 @@ else
   exit 1
 fi
 
-# Do NOT wrap with $STD — curl output is piped directly to gpg
+# Download the GPG key to a temp file first.
+# Piping curl directly into gpg means a DNS/network failure produces an empty
+# stream which gpg then errors on with exit code 2 ("no valid OpenPGP data").
+# Downloading first lets curl fail loudly and early with its own exit code.
 curl -fsSL "https://repo.windscribe.com/debian/windscribe.gpg" \
-  | gpg --dearmor -o /usr/share/keyrings/windscribe-archive-keyring.gpg
+  -o /tmp/windscribe.gpg
+gpg --dearmor < /tmp/windscribe.gpg \
+  > /usr/share/keyrings/windscribe-archive-keyring.gpg
+rm -f /tmp/windscribe.gpg
 
 echo "deb [arch=${WS_ARCH} signed-by=/usr/share/keyrings/windscribe-archive-keyring.gpg] \
 https://repo.windscribe.com/debian/ stable main" \
