@@ -7,6 +7,49 @@
 #   Gharmonize : https://github.com/G-grbz/Gharmonize
 #   Windscribe  : https://windscribe.com/download?cpid=homepage
 
+# ==============================================================================
+# DNS REPAIR — must run BEFORE source/catch_errors/set -e
+# The framework's catch_errors() enables set -Eeuo pipefail + ERR trap, which
+# means any failed command kills the script instantly.  We fix DNS first, while
+# the shell is still in a lenient state, so every subsequent curl/git/apt call
+# can actually reach the internet.
+# getent can succeed via /etc/hosts even when external DNS is broken, so we
+# use curl with a short timeout as the real probe.
+# ==============================================================================
+_fix_dns() {
+  # Test with a real external host using curl (not getent/ping which can use /etc/hosts)
+  if curl -fsSL --max-time 5 --head https://deb.debian.org/ -o /dev/null 2>/dev/null; then
+    return 0  # DNS is fine
+  fi
+
+  # DNS broken — write fallback resolv.conf (Cloudflare + Google)
+  cat > /etc/resolv.conf <<'RESOLV'
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+options edns0 trust-ad
+RESOLV
+
+  # Give the kernel a moment to pick up the new config
+  sleep 1
+
+  # Final check — if still broken, bail out with a human-readable message
+  if ! curl -fsSL --max-time 10 --head https://deb.debian.org/ -o /dev/null 2>/dev/null; then
+    echo ""
+    echo " ✖️  DNS is not working inside this container."
+    echo "     Tried: 1.1.1.1 and 8.8.8.8"
+    echo ""
+    echo "     Fix on the Proxmox HOST before re-running:"
+    echo "       pct set <CTID> --nameserver 1.1.1.1"
+    echo "     Or set DNS in the network bridge / LXC advanced options."
+    echo ""
+    exit 1
+  fi
+}
+_fix_dns
+
+# ==============================================================================
+# Framework bootstrap — NOW safe to enable strict error handling
+# ==============================================================================
 source /dev/stdin <<< "$FUNCTIONS_FILE_PATH"
 color
 verb_ip6
@@ -14,25 +57,6 @@ catch_errors
 setting_up_container
 network_check
 update_os
-
-# ─── DNS Guard ────────────────────────────────────────────────────────────────
-# LXC containers sometimes start without a working resolv.conf.
-# Write a sane fallback before any curl/git/apt call touches the internet.
-msg_info "Checking DNS"
-if ! getent hosts debian.org &>/dev/null; then
-  msg_info "DNS not resolving — writing fallback resolv.conf"
-  cat > /etc/resolv.conf <<'RESOLV'
-nameserver 1.1.1.1
-nameserver 8.8.8.8
-options edns0 trust-ad
-RESOLV
-  sleep 2
-  if ! getent hosts debian.org &>/dev/null; then
-    msg_error "DNS still not working after fallback. Check host bridge / DNS settings."
-    exit 1
-  fi
-fi
-msg_ok "DNS OK"
 
 # ─── Dependencies ─────────────────────────────────────────────────────────────
 msg_info "Installing Dependencies"
@@ -55,9 +79,10 @@ ARCH=$(dpkg --print-architecture)   # amd64 | arm64
 msg_info "Detected architecture: ${ARCH}"
 
 # ─── Node.js 20.x ─────────────────────────────────────────────────────────────
-# Download the NodeSource setup script first, then execute separately.
-# This avoids the "syntax error" that occurs when $STD wraps a pipe-to-bash call
-# and strips the subshell's ANSI/control output mid-stream.
+# Download the NodeSource setup script to a temp file and execute it separately.
+# Avoids the "syntax error / command not found" caused by $STD (silent()) wrapping
+# a pipe-to-bash call — the NodeSource script emits ANSI control sequences that
+# the silent() wrapper tries to parse as shell commands when used with | bash -.
 msg_info "Installing Node.js 20.x"
 curl -fsSL https://deb.nodesource.com/setup_20.x -o /tmp/nodesource_setup.sh
 $STD bash /tmp/nodesource_setup.sh
@@ -72,6 +97,7 @@ msg_ok "Installed ffmpeg"
 
 # ─── yt-dlp ───────────────────────────────────────────────────────────────────
 msg_info "Installing yt-dlp"
+# Do NOT wrap with $STD — curl output is the binary itself, not noise
 curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
   -o /usr/local/bin/yt-dlp
 chmod a+rx /usr/local/bin/yt-dlp
@@ -89,8 +115,10 @@ $STD git clone https://github.com/G-grbz/Gharmonize /opt/gharmonize
 mkdir -p /opt/gharmonize/{uploads,outputs,temp,cookies,local-inputs}
 touch /opt/gharmonize/cookies/cookies.txt
 
+# Capture paths before heredoc to avoid subshell expansion inside EOF
 APP_SECRET=$(openssl rand -hex 32)
 FFMPEG_PATH=$(which ffmpeg)
+
 cat > /opt/gharmonize/.env <<EOF
 ADMIN_PASSWORD=changeme
 APP_SECRET=${APP_SECRET}
@@ -111,6 +139,7 @@ msg_ok "Installed Gharmonize"
 # ─── Systemd Service — Gharmonize ─────────────────────────────────────────────
 msg_info "Creating Gharmonize Service"
 NODE_BIN=$(which node)
+
 cat > /etc/systemd/system/gharmonize.service <<EOF
 [Unit]
 Description=Gharmonize Media Server
@@ -129,6 +158,7 @@ Environment=NODE_ENV=production
 [Install]
 WantedBy=multi-user.target
 EOF
+
 systemctl enable --now gharmonize &>/dev/null
 msg_ok "Created and Started Gharmonize Service"
 
@@ -143,6 +173,7 @@ else
   exit 1
 fi
 
+# Import signing key — do NOT use $STD, curl output is piped directly to gpg
 curl -fsSL "https://repo.windscribe.com/debian/windscribe.gpg" \
   | gpg --dearmor -o /usr/share/keyrings/windscribe-archive-keyring.gpg
 
@@ -155,13 +186,15 @@ $STD apt-get install -y windscribe-cli
 systemctl enable windscribe &>/dev/null || true
 msg_ok "Installed Windscribe CLI"
 
-# ─── Systemd Service — Windscribe post-init ───────────────────────────────────
-# Windscribe's default "auto" firewall kills all non-VPN traffic in LXC.
-# This one-shot disables it after windscribed comes up.
+# ─── Systemd Service — Windscribe firewall post-init ──────────────────────────
+# Windscribe's default "auto" firewall kills ALL non-VPN traffic in LXC,
+# breaking the container entirely.  This one-shot service disables it at boot
+# after windscribed is fully up, so normal traffic still works when no VPN
+# is connected.
 msg_info "Creating Windscribe post-init Service"
 cat > /etc/systemd/system/windscribe-postinit.service <<'EOF'
 [Unit]
-Description=Windscribe post-init (disable firewall for headless LXC)
+Description=Windscribe firewall off (headless LXC safe mode)
 After=windscribe.service
 Requires=windscribe.service
 
