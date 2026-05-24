@@ -60,6 +60,9 @@ cat <<EOF >/opt/nutritrace/server/.env
 DB_PATH=/opt/nutritrace-data/db/nutritrace.db
 UPLOADS_PATH=/opt/nutritrace-data/uploads
 JWT_SECRET=${JWT_SECRET}
+# Required for plain-HTTP LXC installs — allows auth cookies to be sent without HTTPS.
+# Only safe on a trusted local network. Remove if you add a reverse proxy with TLS.
+INSECURE_COOKIES=1
 # Optional SMTP (for password reset & user invites)
 # SMTP_HOST=smtp.example.com
 # SMTP_PORT=587
@@ -97,6 +100,11 @@ SyslogIdentifier=nutritrace
 WantedBy=multi-user.target
 EOF
 msg_ok "Created Systemd Service"
+
+msg_info "Configuring Cookie Security for HTTP"
+# NutriTrace defaults to secure (HTTPS-only) cookies. Since LXC installs run over
+# plain HTTP on the local network, INSECURE_COOKIES=1 is set in the .env above.
+msg_ok "Configured Cookie Security"
 
 msg_info "Enabling and Starting NutriTrace"
 systemctl enable -q nutritrace
