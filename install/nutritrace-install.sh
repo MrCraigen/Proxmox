@@ -36,6 +36,9 @@ msg_info "Building Frontend (Svelte/Vite)"
 cd /opt/nutritrace
 $STD npm install
 $STD npm run build
+# Mirror what the Dockerfile does: COPY --from=build /app/dist ./dist
+# The Express server serves static files from ./dist relative to its own directory
+cp -r /opt/nutritrace/dist /opt/nutritrace/server/dist
 msg_ok "Built Frontend"
 
 msg_info "Installing Server Dependencies"
