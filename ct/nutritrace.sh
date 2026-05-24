@@ -40,6 +40,7 @@ function update_script() {
   msg_info "Building Frontend"
   npm install &>/dev/null
   npm run build &>/dev/null
+  cp -r /opt/nutritrace/dist /opt/nutritrace/server/dist
   msg_ok "Built Frontend"
 
   msg_info "Installing Server Dependencies"
