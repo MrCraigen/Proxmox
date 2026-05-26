@@ -104,7 +104,7 @@ cp /opt/SparkyFitness/.env .env
 # Fallback: if the server has its own lock file use that, otherwise use npm install
 if [[ -f "/opt/SparkyFitness/pnpm-lock.yaml" ]]; then
   cd /opt/SparkyFitness
-  $STD pnpm install --frozen-lockfile --filter ./SparkyFitnessServer --prod
+  HUSKY=0 $STD pnpm install --frozen-lockfile --ignore-scripts --filter ./SparkyFitnessServer
 elif [[ -f "package-lock.json" ]]; then
   $STD npm ci --omit=dev
 else
@@ -120,7 +120,7 @@ VITE_API_URL=http://${IP}:3010
 EOF
 if [[ -f "/opt/SparkyFitness/pnpm-lock.yaml" ]]; then
   cd /opt/SparkyFitness
-  $STD pnpm install --frozen-lockfile --filter ./SparkyFitnessFrontend
+  HUSKY=0 $STD pnpm install --frozen-lockfile --ignore-scripts --filter ./SparkyFitnessFrontend
   $STD pnpm --filter ./SparkyFitnessFrontend run build
 else
   cd /opt/SparkyFitness/SparkyFitnessFrontend
