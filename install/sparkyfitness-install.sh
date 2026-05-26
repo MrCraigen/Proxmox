@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 
-# Copyright (c) 2021-2026 tteck
-# Author: MrCraigen
+# Copyright (c) 2021-2026 community-scripts ORG
+# Author: Tom Frenzel (tomfrenzel) | ARM64 port: MrCraigen
 # License: MIT | https://github.com/MrCraigen/Proxmox/raw/main/LICENSE
 # Source: https://github.com/CodeWithCJ/SparkyFitness
 
-source /dev/stdin <<< "$FUNCTIONS_FILE_PATH"
+source /dev/stdin <<<"$FUNCTIONS_FILE_PATH"
 color
 verb_ip6
 catch_errors
@@ -22,7 +22,7 @@ $STD apt-get install -y \
   lsb-release \
   nginx \
   openssl \
-  sudo \
+  jq \
   xz-utils
 msg_ok "Installed Dependencies"
 
@@ -45,6 +45,7 @@ echo "deb [signed-by=/etc/apt/keyrings/postgresql.gpg] https://apt.postgresql.or
   > /etc/apt/sources.list.d/pgdg.list
 $STD apt-get update
 $STD apt-get install -y postgresql-15
+systemctl enable --now postgresql &>/dev/null
 msg_ok "Installed PostgreSQL 15"
 
 msg_info "Cloning SparkyFitness Repository"
@@ -52,184 +53,94 @@ LATEST=$(git ls-remote --tags --sort="v:refname" \
   https://github.com/CodeWithCJ/SparkyFitness.git \
   | grep -v '\^{}' | tail -1 | sed 's|.*refs/tags/||')
 git clone --branch "$LATEST" --depth 1 \
-  https://github.com/CodeWithCJ/SparkyFitness.git /opt/SparkyFitness &>/dev/null
-echo "$LATEST" > /opt/SparkyFitness/.version
+  https://github.com/CodeWithCJ/SparkyFitness.git /opt/sparkyfitness &>/dev/null
+echo "$LATEST" > /opt/sparkyfitness/.version
 msg_ok "Cloned SparkyFitness ${LATEST}"
 
-msg_info "Configuring PostgreSQL"
-DB_NAME="sparky"
-DB_USER="sparkyuser"
-DB_PASS="$(openssl rand -hex 16)"
-APP_DB_USER="sparkyappuser"
-APP_DB_PASS="$(openssl rand -hex 16)"
+msg_info "Configuring Database"
+PG_DB_PASS="$(openssl rand -base64 24 | tr -dc 'a-zA-Z0-9' | head -c20)"
+PG_APP_PASS="$(openssl rand -base64 24 | tr -dc 'a-zA-Z0-9' | head -c20)"
+sudo -u postgres psql -c "CREATE USER sparky WITH PASSWORD '${PG_DB_PASS}';" &>/dev/null
+sudo -u postgres psql -c "CREATE DATABASE sparkyfitness OWNER sparky;" &>/dev/null
+sudo -u postgres psql -d sparkyfitness -c "CREATE USER sparky_app WITH PASSWORD '${PG_APP_PASS}';" &>/dev/null
+sudo -u postgres psql -d sparkyfitness -c "GRANT CONNECT ON DATABASE sparkyfitness TO sparky_app;" &>/dev/null
+msg_ok "Configured Database"
 
-systemctl enable --now postgresql &>/dev/null
+msg_info "Configuring SparkyFitness"
+LOCAL_IP=$(hostname -I | awk '{print $1}')
+mkdir -p /etc/sparkyfitness /var/lib/sparkyfitness/uploads /var/lib/sparkyfitness/backup /var/www/sparkyfitness
+cp /opt/sparkyfitness/docker/.env.example /etc/sparkyfitness/.env
+sed \
+  -i \
+  -e "s|^#\?SPARKY_FITNESS_DB_HOST=.*|SPARKY_FITNESS_DB_HOST=localhost|" \
+  -e "s|^#\?SPARKY_FITNESS_DB_PORT=.*|SPARKY_FITNESS_DB_PORT=5432|" \
+  -e "s|^SPARKY_FITNESS_DB_NAME=.*|SPARKY_FITNESS_DB_NAME=sparkyfitness|" \
+  -e "s|^SPARKY_FITNESS_DB_USER=.*|SPARKY_FITNESS_DB_USER=sparky|" \
+  -e "s|^SPARKY_FITNESS_DB_PASSWORD=.*|SPARKY_FITNESS_DB_PASSWORD=${PG_DB_PASS}|" \
+  -e "s|^SPARKY_FITNESS_APP_DB_USER=.*|SPARKY_FITNESS_APP_DB_USER=sparky_app|" \
+  -e "s|^SPARKY_FITNESS_APP_DB_PASSWORD=.*|SPARKY_FITNESS_APP_DB_PASSWORD=${PG_APP_PASS}|" \
+  -e "s|^SPARKY_FITNESS_SERVER_HOST=.*|SPARKY_FITNESS_SERVER_HOST=localhost|" \
+  -e "s|^SPARKY_FITNESS_SERVER_PORT=.*|SPARKY_FITNESS_SERVER_PORT=3010|" \
+  -e "s|^SPARKY_FITNESS_FRONTEND_URL=.*|SPARKY_FITNESS_FRONTEND_URL=http://${LOCAL_IP}:80|" \
+  -e "s|^GARMIN_MICROSERVICE_URL=.*|GARMIN_MICROSERVICE_URL=http://${LOCAL_IP}:8000|" \
+  -e "s|^SPARKY_FITNESS_API_ENCRYPTION_KEY=.*|SPARKY_FITNESS_API_ENCRYPTION_KEY=$(openssl rand -hex 32)|" \
+  -e "s|^BETTER_AUTH_SECRET=.*|BETTER_AUTH_SECRET=$(openssl rand -hex 32)|" \
+  /etc/sparkyfitness/.env
+# Link env into server dir (tsx picks it up from cwd)
+ln -sf /etc/sparkyfitness/.env /opt/sparkyfitness/SparkyFitnessServer/.env
+msg_ok "Configured SparkyFitness"
 
-sudo -u postgres psql -c "CREATE USER ${DB_USER} WITH PASSWORD '${DB_PASS}';" &>/dev/null
-sudo -u postgres psql -c "CREATE DATABASE ${DB_NAME} OWNER ${DB_USER};" &>/dev/null
-sudo -u postgres psql -d "${DB_NAME}" -c "CREATE USER ${APP_DB_USER} WITH PASSWORD '${APP_DB_PASS}';" &>/dev/null
-sudo -u postgres psql -d "${DB_NAME}" -c "GRANT CONNECT ON DATABASE ${DB_NAME} TO ${APP_DB_USER};" &>/dev/null
-msg_ok "Configured PostgreSQL"
+msg_info "Building Backend"
+cd /opt/sparkyfitness/SparkyFitnessServer
+HUSKY=0 $STD pnpm install --ignore-scripts
+msg_ok "Built Backend"
 
-msg_info "Configuring Environment"
-API_KEY="$(openssl rand -hex 32)"
-JWT_SECRET="$(openssl rand -hex 32)"
-IP=$(hostname -I | awk '{print $1}')
-
-cat > /opt/SparkyFitness/.env << EOF
-# Database
-SPARKY_FITNESS_DB_HOST=localhost
-SPARKY_FITNESS_DB_PORT=5432
-SPARKY_FITNESS_DB_NAME=${DB_NAME}
-SPARKY_FITNESS_DB_USER=${DB_USER}
-SPARKY_FITNESS_DB_PASSWORD=${DB_PASS}
-SPARKY_FITNESS_APP_DB_USER=${APP_DB_USER}
-SPARKY_FITNESS_APP_DB_PASSWORD=${APP_DB_PASS}
-
-# Application
-SPARKY_FITNESS_API_ENCRYPTION_KEY=${API_KEY}
-SPARKY_FITNESS_JWT_SECRET=${JWT_SECRET}
-SPARKY_FITNESS_FRONTEND_URL=http://${IP}:8080
-SPARKY_FITNESS_LOG_LEVEL=info
-
-# Server
-PORT=3010
-NODE_ENV=production
-EOF
-msg_ok "Configured Environment"
-
-msg_info "Installing Server Dependencies"
-cd /opt/SparkyFitness/SparkyFitnessServer
-cp /opt/SparkyFitness/.env .env
-# pnpm-lock.yaml lives at the monorepo root; run install from there filtered to server
-# Fallback: if the server has its own lock file use that, otherwise use npm install
-if [[ -f "/opt/SparkyFitness/pnpm-lock.yaml" ]]; then
-  cd /opt/SparkyFitness
-  HUSKY=0 $STD pnpm install --frozen-lockfile --ignore-scripts --filter ./SparkyFitnessServer
-elif [[ -f "package-lock.json" ]]; then
-  $STD npm ci --omit=dev
-else
-  $STD npm install --omit=dev
-fi
-msg_ok "Installed Server Dependencies"
-
-msg_info "Building Frontend"
-cd /opt/SparkyFitness/SparkyFitnessFrontend
-cp /opt/SparkyFitness/.env .env
-cat > .env.production << EOF
-VITE_API_URL=http://${IP}:3010
-EOF
-if [[ -f "/opt/SparkyFitness/pnpm-lock.yaml" ]]; then
-  cd /opt/SparkyFitness
-  HUSKY=0 $STD pnpm install --frozen-lockfile --ignore-scripts --filter ./SparkyFitnessFrontend
-  $STD pnpm --filter ./SparkyFitnessFrontend run build
-else
-  cd /opt/SparkyFitness/SparkyFitnessFrontend
-  $STD npm install
-  $STD npm run build
-fi
-mkdir -p /var/www/sparkyfitness
-cp -r /opt/SparkyFitness/SparkyFitnessFrontend/dist/* /var/www/sparkyfitness/
+msg_info "Building Frontend (Patience)"
+cd /opt/sparkyfitness
+HUSKY=0 $STD pnpm install --ignore-scripts
+cd /opt/sparkyfitness/SparkyFitnessFrontend
+$STD pnpm run build
+cp -a /opt/sparkyfitness/SparkyFitnessFrontend/dist/. /var/www/sparkyfitness/
 msg_ok "Built Frontend"
 
-msg_info "Detecting Server Entry Point"
-SERVER_ENTRY="server.js"
-PKG_MAIN=$(node -e "try{const p=require('/opt/SparkyFitness/SparkyFitnessServer/package.json');console.log(p.main||p.scripts&&p.scripts.start&&p.scripts.start.replace(/^node\s+/,'')||'')}catch(e){}" 2>/dev/null)
-if [[ -n "$PKG_MAIN" && -f "/opt/SparkyFitness/SparkyFitnessServer/${PKG_MAIN}" ]]; then
-  SERVER_ENTRY="$PKG_MAIN"
-else
-  for f in server.js index.js app.js src/server.js src/index.js src/app.js; do
-    if [[ -f "/opt/SparkyFitness/SparkyFitnessServer/${f}" ]]; then
-      SERVER_ENTRY="$f"
-      break
-    fi
-  done
-fi
-msg_ok "Server entry point: ${SERVER_ENTRY}"
-
-msg_info "Creating systemd Service"
-cat > /etc/systemd/system/sparkyfitness-server.service << EOF
+msg_info "Creating SparkyFitness Service"
+cat <<EOF >/etc/systemd/system/sparkyfitness-server.service
 [Unit]
-Description=SparkyFitness Backend Server
+Description=SparkyFitness Backend Service
 After=network.target postgresql.service
 Requires=postgresql.service
 
 [Service]
 Type=simple
-User=root
-WorkingDirectory=/opt/SparkyFitness/SparkyFitnessServer
-EnvironmentFile=/opt/SparkyFitness/.env
-ExecStart=/usr/local/bin/node ${SERVER_ENTRY}
+WorkingDirectory=/opt/sparkyfitness/SparkyFitnessServer
+EnvironmentFile=/etc/sparkyfitness/.env
+ExecStart=/opt/sparkyfitness/SparkyFitnessServer/node_modules/.bin/tsx SparkyFitnessServer.js
 Restart=always
-RestartSec=10
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=sparkyfitness-server
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 EOF
-
-systemctl enable --now sparkyfitness-server &>/dev/null
-msg_ok "Created and Started sparkyfitness-server Service"
+systemctl enable -q --now sparkyfitness-server
+msg_ok "Created SparkyFitness Service"
 
 msg_info "Configuring Nginx"
-cat > /etc/nginx/sites-available/sparkyfitness << EOF
-server {
-    listen 8080;
-    server_name _;
-
-    root /var/www/sparkyfitness;
-    index index.html;
-
-    client_max_body_size 50M;
-
-    # Serve frontend SPA
-    location / {
-        try_files \$uri \$uri/ /index.html;
-    }
-
-    # Proxy API requests to backend
-    location /api/ {
-        proxy_pass http://127.0.0.1:3010;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_cache_bypass \$http_upgrade;
-    }
-}
-EOF
-
-rm -f /etc/nginx/sites-enabled/default
+sed \
+  -e 's|${SPARKY_FITNESS_SERVER_HOST}|127.0.0.1|g' \
+  -e 's|${SPARKY_FITNESS_SERVER_PORT}|3010|g' \
+  -e 's|${NGINX_LISTEN_PORT}|80|g' \
+  -e 's|${NGINX_ACCESS_LOG}|/var/log/nginx/sparkyfitness.access.log|g' \
+  -e 's|${NGINX_ERROR_LOG}|/var/log/nginx/sparkyfitness.error.log|g' \
+  -e 's|root /usr/share/nginx/html;|root /var/www/sparkyfitness;|g' \
+  -e 's|server_name localhost;|server_name _;|g' \
+  /opt/sparkyfitness/docker/nginx.conf >/etc/nginx/sites-available/sparkyfitness
 ln -sf /etc/nginx/sites-available/sparkyfitness /etc/nginx/sites-enabled/sparkyfitness
+rm -f /etc/nginx/sites-enabled/default
 $STD nginx -t
-systemctl enable --now nginx &>/dev/null
+systemctl enable -q --now nginx
+$STD systemctl reload nginx
 msg_ok "Configured Nginx"
-
-msg_info "Saving Credentials"
-cat > /root/.sparkyfitness_credentials << EOF
-SparkyFitness Credentials
-=========================
-DB Name:          ${DB_NAME}
-DB Admin User:    ${DB_USER}
-DB Admin Pass:    ${DB_PASS}
-DB App User:      ${APP_DB_USER}
-DB App Pass:      ${APP_DB_PASS}
-API Encrypt Key:  ${API_KEY}
-JWT Secret:       ${JWT_SECRET}
-Frontend URL:     http://${IP}:8080
-Backend Port:     3010
-EOF
-chmod 600 /root/.sparkyfitness_credentials
-msg_ok "Credentials saved to /root/.sparkyfitness_credentials"
 
 motd_ssh
 customize
-
-msg_info "Cleaning Up"
-$STD apt-get autoremove -y
-$STD apt-get autoclean -y
-msg_ok "Cleaned Up"
+cleanup_lxc
