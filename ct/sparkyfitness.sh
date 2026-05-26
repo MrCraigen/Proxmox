@@ -35,8 +35,9 @@ function update_script() {
 
   msg_info "Updating ${APP}"
   cd /opt/SparkyFitness
-  git fetch --tags --quiet
-  LATEST=$(git describe --tags "$(git rev-list --tags --max-count=1)")
+  LATEST=$(git ls-remote --tags --sort="v:refname" \
+    https://github.com/CodeWithCJ/SparkyFitness.git \
+    | grep -v '\^{}' | tail -1 | sed 's|.*refs/tags/||')
   CURRENT=$(cat /opt/SparkyFitness/.version 2>/dev/null || echo "unknown")
   if [[ "$CURRENT" == "$LATEST" ]]; then
     msg_ok "Already on latest version: ${LATEST}"
