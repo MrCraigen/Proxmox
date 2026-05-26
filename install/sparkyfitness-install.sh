@@ -48,8 +48,9 @@ $STD apt-get install -y postgresql-15
 msg_ok "Installed PostgreSQL 15"
 
 msg_info "Cloning SparkyFitness Repository"
-LATEST=$(curl -fsSL "https://api.github.com/repos/CodeWithCJ/SparkyFitness/releases/latest" \
-  | grep '"tag_name"' | sed 's/.*"tag_name": "\(.*\)".*/\1/')
+LATEST=$(git ls-remote --tags --sort="v:refname" \
+  https://github.com/CodeWithCJ/SparkyFitness.git \
+  | grep -v '\^{}' | tail -1 | sed 's|.*refs/tags/||')
 git clone --branch "$LATEST" --depth 1 \
   https://github.com/CodeWithCJ/SparkyFitness.git /opt/SparkyFitness &>/dev/null
 echo "$LATEST" > /opt/SparkyFitness/.version
