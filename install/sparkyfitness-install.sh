@@ -34,6 +34,10 @@ tar -xJf "/tmp/${NODE_ARCHIVE}" -C /usr/local --strip-components=1
 rm -f "/tmp/${NODE_ARCHIVE}"
 msg_ok "Installed Node.js $(node -v)"
 
+msg_info "Installing pnpm"
+npm install -g pnpm &>/dev/null
+msg_ok "Installed pnpm $(pnpm -v)"
+
 msg_info "Installing PostgreSQL 15"
 curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
   | gpg --dearmor -o /etc/apt/keyrings/postgresql.gpg
@@ -96,7 +100,16 @@ msg_ok "Configured Environment"
 msg_info "Installing Server Dependencies"
 cd /opt/SparkyFitness/SparkyFitnessServer
 cp /opt/SparkyFitness/.env .env
-$STD npm ci --omit=dev
+# pnpm-lock.yaml lives at the monorepo root; run install from there filtered to server
+# Fallback: if the server has its own lock file use that, otherwise use npm install
+if [[ -f "/opt/SparkyFitness/pnpm-lock.yaml" ]]; then
+  cd /opt/SparkyFitness
+  $STD pnpm install --frozen-lockfile --filter ./SparkyFitnessServer --prod
+elif [[ -f "package-lock.json" ]]; then
+  $STD npm ci --omit=dev
+else
+  $STD npm install --omit=dev
+fi
 msg_ok "Installed Server Dependencies"
 
 msg_info "Building Frontend"
@@ -105,23 +118,32 @@ cp /opt/SparkyFitness/.env .env
 cat > .env.production << EOF
 VITE_API_URL=http://${IP}:3010
 EOF
-$STD npm ci
-$STD npm run build
+if [[ -f "/opt/SparkyFitness/pnpm-lock.yaml" ]]; then
+  cd /opt/SparkyFitness
+  $STD pnpm install --frozen-lockfile --filter ./SparkyFitnessFrontend
+  $STD pnpm --filter ./SparkyFitnessFrontend run build
+else
+  cd /opt/SparkyFitness/SparkyFitnessFrontend
+  $STD npm install
+  $STD npm run build
+fi
 mkdir -p /var/www/sparkyfitness
-cp -r dist/* /var/www/sparkyfitness/
+cp -r /opt/SparkyFitness/SparkyFitnessFrontend/dist/* /var/www/sparkyfitness/
 msg_ok "Built Frontend"
 
 msg_info "Detecting Server Entry Point"
 SERVER_ENTRY="server.js"
-for f in server.js index.js app.js src/server.js src/index.js; do
-  if [[ -f "/opt/SparkyFitness/SparkyFitnessServer/${f}" ]]; then
-    SERVER_ENTRY="$f"
-    break
-  fi
-done
-# Also check package.json "main" field
-PKG_MAIN=$(node -e "try{const p=require('/opt/SparkyFitness/SparkyFitnessServer/package.json');console.log(p.main||'')}catch(e){}" 2>/dev/null)
-[[ -n "$PKG_MAIN" && -f "/opt/SparkyFitness/SparkyFitnessServer/${PKG_MAIN}" ]] && SERVER_ENTRY="$PKG_MAIN"
+PKG_MAIN=$(node -e "try{const p=require('/opt/SparkyFitness/SparkyFitnessServer/package.json');console.log(p.main||p.scripts&&p.scripts.start&&p.scripts.start.replace(/^node\s+/,'')||'')}catch(e){}" 2>/dev/null)
+if [[ -n "$PKG_MAIN" && -f "/opt/SparkyFitness/SparkyFitnessServer/${PKG_MAIN}" ]]; then
+  SERVER_ENTRY="$PKG_MAIN"
+else
+  for f in server.js index.js app.js src/server.js src/index.js src/app.js; do
+    if [[ -f "/opt/SparkyFitness/SparkyFitnessServer/${f}" ]]; then
+      SERVER_ENTRY="$f"
+      break
+    fi
+  done
+fi
 msg_ok "Server entry point: ${SERVER_ENTRY}"
 
 msg_info "Creating systemd Service"
