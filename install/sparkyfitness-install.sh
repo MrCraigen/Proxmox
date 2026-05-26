@@ -22,17 +22,16 @@ $STD apt-get install -y \
   lsb-release \
   nginx \
   openssl \
-  sudo
+  sudo \
+  xz-utils
 msg_ok "Installed Dependencies"
 
-msg_info "Installing Node.js 22 LTS (arm64)"
-mkdir -p /etc/apt/keyrings
-curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
-  | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
-echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
-  > /etc/apt/sources.list.d/nodesource.list
-$STD apt-get update
-$STD apt-get install -y nodejs
+msg_info "Installing Node.js 22 LTS (arm64 binary)"
+NODE_VER="22.16.0"
+NODE_ARCHIVE="node-v${NODE_VER}-linux-arm64.tar.xz"
+curl -fsSL "https://nodejs.org/dist/v${NODE_VER}/${NODE_ARCHIVE}" -o "/tmp/${NODE_ARCHIVE}"
+tar -xJf "/tmp/${NODE_ARCHIVE}" -C /usr/local --strip-components=1
+rm -f "/tmp/${NODE_ARCHIVE}"
 msg_ok "Installed Node.js $(node -v)"
 
 msg_info "Installing PostgreSQL 15"
@@ -103,7 +102,6 @@ msg_ok "Installed Server Dependencies"
 msg_info "Building Frontend"
 cd /opt/SparkyFitness/SparkyFitnessFrontend
 cp /opt/SparkyFitness/.env .env
-# Write frontend env — Vite uses VITE_ prefix at build time
 cat > .env.production << EOF
 VITE_API_URL=http://${IP}:3010
 EOF
@@ -112,6 +110,19 @@ $STD npm run build
 mkdir -p /var/www/sparkyfitness
 cp -r dist/* /var/www/sparkyfitness/
 msg_ok "Built Frontend"
+
+msg_info "Detecting Server Entry Point"
+SERVER_ENTRY="server.js"
+for f in server.js index.js app.js src/server.js src/index.js; do
+  if [[ -f "/opt/SparkyFitness/SparkyFitnessServer/${f}" ]]; then
+    SERVER_ENTRY="$f"
+    break
+  fi
+done
+# Also check package.json "main" field
+PKG_MAIN=$(node -e "try{const p=require('/opt/SparkyFitness/SparkyFitnessServer/package.json');console.log(p.main||'')}catch(e){}" 2>/dev/null)
+[[ -n "$PKG_MAIN" && -f "/opt/SparkyFitness/SparkyFitnessServer/${PKG_MAIN}" ]] && SERVER_ENTRY="$PKG_MAIN"
+msg_ok "Server entry point: ${SERVER_ENTRY}"
 
 msg_info "Creating systemd Service"
 cat > /etc/systemd/system/sparkyfitness-server.service << EOF
@@ -125,7 +136,7 @@ Type=simple
 User=root
 WorkingDirectory=/opt/SparkyFitness/SparkyFitnessServer
 EnvironmentFile=/opt/SparkyFitness/.env
-ExecStart=/usr/bin/node server.js
+ExecStart=/usr/local/bin/node ${SERVER_ENTRY}
 Restart=always
 RestartSec=10
 StandardOutput=journal
@@ -147,6 +158,8 @@ server {
 
     root /var/www/sparkyfitness;
     index index.html;
+
+    client_max_body_size 50M;
 
     # Serve frontend SPA
     location / {
