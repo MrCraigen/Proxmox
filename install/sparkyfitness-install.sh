@@ -16,143 +16,179 @@ update_os
 msg_info "Installing Dependencies"
 $STD apt-get install -y \
   curl \
-  ca-certificates \
+  git \
   gnupg \
+  ca-certificates \
   lsb-release \
-  sudo \
-  mc
+  nginx \
+  openssl \
+  sudo
 msg_ok "Installed Dependencies"
 
-msg_info "Installing Docker (ARM64)"
-install -m 0755 -d /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/debian/gpg \
-  | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-chmod a+r /etc/apt/keyrings/docker.gpg
-
-echo \
-  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
-  https://download.docker.com/linux/debian \
-  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
-  > /etc/apt/sources.list.d/docker.list
-
+msg_info "Installing Node.js 22 LTS (arm64)"
+mkdir -p /etc/apt/keyrings
+curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+  | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
+echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
+  > /etc/apt/sources.list.d/nodesource.list
 $STD apt-get update
-$STD apt-get install -y \
-  docker-ce \
-  docker-ce-cli \
-  containerd.io \
-  docker-buildx-plugin \
-  docker-compose-plugin
-msg_ok "Installed Docker (ARM64)"
+$STD apt-get install -y nodejs
+msg_ok "Installed Node.js $(node -v)"
 
-msg_info "Setting Up SparkyFitness"
-mkdir -p /opt/sparkyfitness
-cd /opt/sparkyfitness
+msg_info "Installing PostgreSQL 15"
+curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+  | gpg --dearmor -o /etc/apt/keyrings/postgresql.gpg
+echo "deb [signed-by=/etc/apt/keyrings/postgresql.gpg] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+  > /etc/apt/sources.list.d/pgdg.list
+$STD apt-get update
+$STD apt-get install -y postgresql-15
+msg_ok "Installed PostgreSQL 15"
 
-# Generate secure random passwords and secrets
-DB_PASSWORD=$(openssl rand -hex 16)
-APP_DB_PASSWORD=$(openssl rand -hex 16)
-JWT_SECRET=$(openssl rand -hex 32)
-ENCRYPTION_KEY=$(openssl rand -hex 32)
-ADMIN_PASSWORD=$(openssl rand -hex 8)
+msg_info "Cloning SparkyFitness Repository"
+LATEST=$(curl -fsSL "https://api.github.com/repos/CodeWithCJ/SparkyFitness/releases/latest" \
+  | grep '"tag_name"' | sed 's/.*"tag_name": "\(.*\)".*/\1/')
+git clone --branch "$LATEST" --depth 1 \
+  https://github.com/CodeWithCJ/SparkyFitness.git /opt/SparkyFitness &>/dev/null
+echo "$LATEST" > /opt/SparkyFitness/.version
+msg_ok "Cloned SparkyFitness ${LATEST}"
 
-# Write docker-compose.yml
-cat > /opt/sparkyfitness/docker-compose.yml << 'COMPOSE'
-services:
-  sparkyfitness-db:
-    image: postgres:15-alpine
-    container_name: sparkyfitness-db
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: ${SPARKY_FITNESS_DB_NAME}
-      POSTGRES_USER: ${SPARKY_FITNESS_DB_USER}
-      POSTGRES_PASSWORD: ${SPARKY_FITNESS_DB_PASSWORD}
-    volumes:
-      - /opt/sparkyfitness/postgresql:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${SPARKY_FITNESS_DB_USER} -d ${SPARKY_FITNESS_DB_NAME}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+msg_info "Configuring PostgreSQL"
+DB_NAME="sparky"
+DB_USER="sparkyuser"
+DB_PASS="$(openssl rand -hex 16)"
+APP_DB_USER="sparkyappuser"
+APP_DB_PASS="$(openssl rand -hex 16)"
 
-  sparkyfitness-server:
-    image: codewithcj/sparkyfitness_server:latest
-    container_name: sparkyfitness-server
-    restart: unless-stopped
-    depends_on:
-      sparkyfitness-db:
-        condition: service_healthy
-    environment:
-      SPARKY_FITNESS_LOG_LEVEL: ${SPARKY_FITNESS_LOG_LEVEL}
-      SPARKY_FITNESS_DB_USER: ${SPARKY_FITNESS_DB_USER}
-      SPARKY_FITNESS_DB_HOST: sparkyfitness-db
-      SPARKY_FITNESS_DB_NAME: ${SPARKY_FITNESS_DB_NAME}
-      SPARKY_FITNESS_DB_PASSWORD: ${SPARKY_FITNESS_DB_PASSWORD}
-      SPARKY_FITNESS_APP_DB_USER: ${SPARKY_FITNESS_APP_DB_USER}
-      SPARKY_FITNESS_APP_DB_PASSWORD: ${SPARKY_FITNESS_APP_DB_PASSWORD}
-      SPARKY_FITNESS_API_ENCRYPTION_KEY: ${SPARKY_FITNESS_API_ENCRYPTION_KEY}
-      SPARKY_FITNESS_JWT_SECRET: ${SPARKY_FITNESS_JWT_SECRET}
-      SPARKY_FITNESS_FRONTEND_URL: ${SPARKY_FITNESS_FRONTEND_URL}
-    volumes:
-      - /opt/sparkyfitness/server-data:/app/data
+systemctl enable --now postgresql &>/dev/null
 
-  sparkyfitness-frontend:
-    image: codewithcj/sparkyfitness:latest
-    container_name: sparkyfitness-frontend
-    restart: unless-stopped
-    depends_on:
-      - sparkyfitness-server
-    ports:
-      - "3004:80"
-    environment:
-      SPARKY_FITNESS_SERVER_URL: ${SPARKY_FITNESS_SERVER_URL}
-COMPOSE
+sudo -u postgres psql -c "CREATE USER ${DB_USER} WITH PASSWORD '${DB_PASS}';" &>/dev/null
+sudo -u postgres psql -c "CREATE DATABASE ${DB_NAME} OWNER ${DB_USER};" &>/dev/null
+sudo -u postgres psql -d "${DB_NAME}" -c "CREATE USER ${APP_DB_USER} WITH PASSWORD '${APP_DB_PASS}';" &>/dev/null
+sudo -u postgres psql -d "${DB_NAME}" -c "GRANT CONNECT ON DATABASE ${DB_NAME} TO ${APP_DB_USER};" &>/dev/null
+msg_ok "Configured PostgreSQL"
 
-# Write .env file
-cat > /opt/sparkyfitness/.env << EOF
+msg_info "Configuring Environment"
+API_KEY="$(openssl rand -hex 32)"
+JWT_SECRET="$(openssl rand -hex 32)"
+IP=$(hostname -I | awk '{print $1}')
+
+cat > /opt/SparkyFitness/.env << EOF
 # Database
-SPARKY_FITNESS_DB_NAME=sparkyfitness_db
-SPARKY_FITNESS_DB_USER=sparky_admin
-SPARKY_FITNESS_DB_PASSWORD=${DB_PASSWORD}
+SPARKY_FITNESS_DB_HOST=localhost
+SPARKY_FITNESS_DB_PORT=5432
+SPARKY_FITNESS_DB_NAME=${DB_NAME}
+SPARKY_FITNESS_DB_USER=${DB_USER}
+SPARKY_FITNESS_DB_PASSWORD=${DB_PASS}
+SPARKY_FITNESS_APP_DB_USER=${APP_DB_USER}
+SPARKY_FITNESS_APP_DB_PASSWORD=${APP_DB_PASS}
 
-# App DB user (used by the server at runtime)
-SPARKY_FITNESS_APP_DB_USER=sparky_app
-SPARKY_FITNESS_APP_DB_PASSWORD=${APP_DB_PASSWORD}
+# Application
+SPARKY_FITNESS_API_ENCRYPTION_KEY=${API_KEY}
+SPARKY_FITNESS_JWT_SECRET=${JWT_SECRET}
+SPARKY_FITNESS_FRONTEND_URL=http://${IP}:8080
+SPARKY_FITNESS_LOG_LEVEL=info
 
 # Server
-SPARKY_FITNESS_LOG_LEVEL=info
-SPARKY_FITNESS_API_ENCRYPTION_KEY=${ENCRYPTION_KEY}
-SPARKY_FITNESS_JWT_SECRET=${JWT_SECRET}
+PORT=3010
+NODE_ENV=production
+EOF
+msg_ok "Configured Environment"
 
-# URLs (update IP_ADDRESS after install if needed)
-SPARKY_FITNESS_FRONTEND_URL=http://localhost:3004
-SPARKY_FITNESS_SERVER_URL=http://sparkyfitness-server:3010
+msg_info "Installing Server Dependencies"
+cd /opt/SparkyFitness/SparkyFitnessServer
+cp /opt/SparkyFitness/.env .env
+$STD npm ci --omit=dev
+msg_ok "Installed Server Dependencies"
+
+msg_info "Building Frontend"
+cd /opt/SparkyFitness/SparkyFitnessFrontend
+cp /opt/SparkyFitness/.env .env
+# Write frontend env — Vite uses VITE_ prefix at build time
+cat > .env.production << EOF
+VITE_API_URL=http://${IP}:3010
+EOF
+$STD npm ci
+$STD npm run build
+mkdir -p /var/www/sparkyfitness
+cp -r dist/* /var/www/sparkyfitness/
+msg_ok "Built Frontend"
+
+msg_info "Creating systemd Service"
+cat > /etc/systemd/system/sparkyfitness-server.service << EOF
+[Unit]
+Description=SparkyFitness Backend Server
+After=network.target postgresql.service
+Requires=postgresql.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/SparkyFitness/SparkyFitnessServer
+EnvironmentFile=/opt/SparkyFitness/.env
+ExecStart=/usr/bin/node server.js
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sparkyfitness-server
+
+[Install]
+WantedBy=multi-user.target
 EOF
 
-chmod 600 /opt/sparkyfitness/.env
-msg_ok "Configured SparkyFitness"
+systemctl enable --now sparkyfitness-server &>/dev/null
+msg_ok "Created and Started sparkyfitness-server Service"
 
-msg_info "Pulling Docker Images (ARM64 — this may take a few minutes)"
-cd /opt/sparkyfitness
-docker compose pull &>/dev/null
-msg_ok "Pulled Docker Images"
+msg_info "Configuring Nginx"
+cat > /etc/nginx/sites-available/sparkyfitness << EOF
+server {
+    listen 8080;
+    server_name _;
 
-msg_info "Starting SparkyFitness"
-docker compose up -d &>/dev/null
-msg_ok "Started SparkyFitness"
+    root /var/www/sparkyfitness;
+    index index.html;
 
-msg_info "Creating Credential File"
-cat > /opt/sparkyfitness/credentials.txt << EOF
-=== SparkyFitness Credentials ===
-Frontend URL : http://localhost:3004
-DB Password  : ${DB_PASSWORD}
-App DB Pass  : ${APP_DB_PASSWORD}
-JWT Secret   : ${JWT_SECRET}
-Encryption   : ${ENCRYPTION_KEY}
+    # Serve frontend SPA
+    location / {
+        try_files \$uri \$uri/ /index.html;
+    }
 
-Manage stack : cd /opt/sparkyfitness && docker compose [up -d | down | logs | pull]
+    # Proxy API requests to backend
+    location /api/ {
+        proxy_pass http://127.0.0.1:3010;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_cache_bypass \$http_upgrade;
+    }
+}
 EOF
-chmod 600 /opt/sparkyfitness/credentials.txt
-msg_ok "Credential File Saved to /opt/sparkyfitness/credentials.txt"
+
+rm -f /etc/nginx/sites-enabled/default
+ln -sf /etc/nginx/sites-available/sparkyfitness /etc/nginx/sites-enabled/sparkyfitness
+$STD nginx -t
+systemctl enable --now nginx &>/dev/null
+msg_ok "Configured Nginx"
+
+msg_info "Saving Credentials"
+cat > /root/.sparkyfitness_credentials << EOF
+SparkyFitness Credentials
+=========================
+DB Name:          ${DB_NAME}
+DB Admin User:    ${DB_USER}
+DB Admin Pass:    ${DB_PASS}
+DB App User:      ${APP_DB_USER}
+DB App Pass:      ${APP_DB_PASS}
+API Encrypt Key:  ${API_KEY}
+JWT Secret:       ${JWT_SECRET}
+Frontend URL:     http://${IP}:8080
+Backend Port:     3010
+EOF
+chmod 600 /root/.sparkyfitness_credentials
+msg_ok "Credentials saved to /root/.sparkyfitness_credentials"
 
 motd_ssh
 customize
