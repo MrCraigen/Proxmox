@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 
 # Copyright (c) 2021-2026 tteck
-# Author: havardthom | Co-Author: MickLesk (CanbiZ)
-# License: MIT | https://github.com/asylumexp/Proxmox/raw/main/LICENSE
+# Author: MrCraigen
+# License: MIT | https://github.com/MrCraigen/Proxmox/raw/main/LICENSE
 # Source: https://ollama.com/
 
 source /dev/stdin <<<"$FUNCTIONS_FILE_PATH"
@@ -14,54 +14,14 @@ network_check
 update_os
 
 msg_info "Installing Dependencies"
-$STD apt install -y \
-  build-essential \
-  pkg-config \
-  zstd
+$STD apt-get install -y curl tar
 msg_ok "Installed Dependencies"
 
-msg_info "Installing Golang"
-set +o pipefail
-temp_file=$(mktemp)
-golang_tarball=$(curl -fsSL https://go.dev/dl/ | grep -oP 'go[\d\.]+\.linux-arm64\.tar\.gz' | head -n 1)
-curl -fsSL "https://golang.org/dl/${golang_tarball}" -o "$temp_file"
-tar -C /usr/local -xzf "$temp_file"
-ln -sf /usr/local/go/bin/go /usr/local/bin/go
-rm -f "$temp_file"
-set -o pipefail
-msg_ok "Installed Golang"
-
-setup_hwaccel
-
-msg_info "Installing Ollama (Patience)"
-RELEASE=$(curl -fsSL https://api.github.com/repos/ollama/ollama/releases/latest | grep "tag_name" | awk -F '"' '{print $4}')
-BINDIR="/usr/local/bin"
-mkdir -p $OLLAMA_INSTALL_DIR
-OLLAMA_URL="https://github.com/ollama/ollama/releases/download/${RELEASE}/ollama-linux-arm64.tar.zst"
-TMP_TAR="/tmp/ollama.tar.zst"
-echo -e "\n"
-if curl -fL# -C - -o "$TMP_TAR" "$OLLAMA_URL"; then
-  if tar --zstd -xf "$TMP_TAR" -C "$OLLAMA_INSTALL_DIR"; then
-    ln -sf "$OLLAMA_INSTALL_DIR/bin/ollama" "$BINDIR/ollama"
-    echo "${RELEASE}" >/opt/Ollama_version.txt
-    msg_ok "Installed Ollama ${RELEASE}"
-  else
-    msg_error "Extraction failed – archive corrupt or incomplete"
-    exit 1
-  fi
-else
-  msg_error "Download failed – $OLLAMA_URL not reachable"
-  exit 1
-fi
-
-msg_info "Creating ollama User and Group"
-if ! id ollama >/dev/null 2>&1; then
-  useradd -r -s /usr/sbin/nologin -U -m -d /usr/share/ollama ollama
-fi
-$STD usermod -aG render ollama || true
-$STD usermod -aG video ollama || true
-$STD usermod -aG ollama $(id -u -n)
-msg_ok "Created ollama User and adjusted Groups"
+msg_info "Installing Ollama (ARM64)"
+LATEST=$(curl -fsSL https://api.github.com/repos/ollama/ollama/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
+curl -fsSL "https://github.com/ollama/ollama/releases/download/${LATEST}/ollama-linux-arm64.tar.gz" \
+  | tar -xz -C /usr/local
+msg_ok "Installed Ollama ${LATEST}"
 
 msg_info "Creating Service"
 cat <<EOF >/etc/systemd/system/ollama.service
@@ -70,22 +30,49 @@ Description=Ollama Service
 After=network-online.target
 
 [Service]
-Type=exec
 ExecStart=/usr/local/bin/ollama serve
-Environment=HOME=$HOME
-Environment=OLLAMA_INTEL_GPU=true
-Environment=OLLAMA_HOST=0.0.0.0
-Environment=OLLAMA_NUM_GPU=999
-Environment=SYCL_CACHE_PERSISTENT=1
-Environment=ZES_ENABLE_SYSMAN=1
+User=root
+Group=root
 Restart=always
 RestartSec=3
+Environment=OLLAMA_HOST=0.0.0.0:11434
+Environment=HOME=/root
 
 [Install]
 WantedBy=multi-user.target
 EOF
 systemctl enable -q --now ollama
 msg_ok "Created Service"
+
+msg_info "Creating MOTD"
+cat <<'EOF' >/etc/motd
+
+╔══════════════════════════════════════════════════════════╗
+║                  Ollama AI - ARM64                       ║
+╠══════════════════════════════════════════════════════════╣
+║  API   : http://<CT-IP>:11434                            ║
+║  Compat: http://<CT-IP>:11434/v1/chat/completions        ║
+╠══════════════════════════════════════════════════════════╣
+║  PULL A MODEL (run inside this LXC):                     ║
+║   ollama pull gemma3:12b      (~8GB, recommended)        ║
+║   ollama pull mistral:7b      (~4GB, fast)               ║
+║   ollama pull llama3.2:3b     (~2GB, very fast)          ║
+║   ollama pull qwen2.5:7b      (~4GB, great for code)     ║
+║   ollama pull phi4:14b        (~9GB, very capable)       ║
+╠══════════════════════════════════════════════════════════╣
+║  USAGE EXAMPLE:                                          ║
+║   baseURL: "http://<CT-IP>:11434/v1"                     ║
+║   apiKey:  "ollama"  (any string)                        ║
+║   model:   "gemma3:12b"                                  ║
+╠══════════════════════════════════════════════════════════╣
+║  SERVICE:                                                ║
+║   systemctl status ollama                                ║
+║   systemctl restart ollama                               ║
+║   journalctl -u ollama -f                                ║
+╚══════════════════════════════════════════════════════════╝
+
+EOF
+msg_ok "Created MOTD"
 
 motd_ssh
 customize
