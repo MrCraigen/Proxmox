@@ -14,14 +14,15 @@ network_check
 update_os
 
 msg_info "Installing Dependencies"
-$STD apt-get install -y curl tar
+$STD apt-get install -y curl zstd tar
 msg_ok "Installed Dependencies"
 
 msg_info "Installing Ollama (ARM64)"
-LATEST=$(curl -fsSL https://api.github.com/repos/ollama/ollama/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
-curl -fsSL "https://github.com/ollama/ollama/releases/download/${LATEST}/ollama-linux-arm64.tar.gz" \
-  | tar -xz -C /usr/local
-msg_ok "Installed Ollama ${LATEST}"
+curl -fsSL "https://github.com/ollama/ollama/releases/latest/download/ollama-linux-arm64.tar.zst" \
+  -o /tmp/ollama-linux-arm64.tar.zst
+tar -I zstd -xf /tmp/ollama-linux-arm64.tar.zst -C /usr/local
+rm -f /tmp/ollama-linux-arm64.tar.zst
+msg_ok "Installed Ollama"
 
 msg_info "Creating Service"
 cat <<EOF >/etc/systemd/system/ollama.service
